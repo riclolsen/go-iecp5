@@ -31,4 +31,5 @@ type ClientHandlerInterface interface {
 	ResetProcessHandler(asdu.Connect, *asdu.ASDU) error
 	DelayAcquisitionHandler(asdu.Connect, *asdu.ASDU) error
 	ASDUHandler(asdu.Connect, *asdu.ASDU, *Server, int) error
+	ASDUHandlerAll(asdu.Connect, *asdu.ASDU, *Server, int) error // allow handling of all AL messages
 }
