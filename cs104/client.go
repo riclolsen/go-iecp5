@@ -505,7 +505,8 @@ func (sf *Client) clientHandler(asduPack *asdu.ASDU) error {
 	}()
 
 	sf.Debug("ASDU %+v", asduPack)
-
+	sf.handler.ASDUHandlerAll(sf, asduPack, sf.pairedServer, sf.clientNumber)
+	
 	switch asduPack.Identifier.Type {
 	case asdu.C_IC_NA_1: // InterrogationCmd
 		return sf.handler.InterrogationHandler(sf, asduPack)
