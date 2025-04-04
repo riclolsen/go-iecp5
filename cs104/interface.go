@@ -19,6 +19,7 @@ type ServerHandlerInterface interface {
 	ResetProcessHandler(asdu.Connect, *asdu.ASDU, asdu.QualifierOfResetProcessCmd) error
 	DelayAcquisitionHandler(asdu.Connect, *asdu.ASDU, uint16) error
 	ASDUHandler(asdu.Connect, *asdu.ASDU) error
+	ASDUHandlerAll(asdu.Connect, *asdu.ASDU, int) error // allow handling of all AL messages
 }
 
 // ClientHandlerInterface  is the interface of client handler

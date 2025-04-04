@@ -52,9 +52,10 @@ type SrvSession struct {
 	onConnection   func(asdu.Connect)
 	connectionLost func(asdu.Connect)
 
-	wg     sync.WaitGroup
-	cancel context.CancelFunc
-	ctx    context.Context
+	wg           sync.WaitGroup
+	cancel       context.CancelFunc
+	ctx          context.Context
+	serverNumber int
 }
 
 // RecvLoop feeds t.rcvRaw.
@@ -419,6 +420,7 @@ func (sf *SrvSession) serverHandler(asduPack *asdu.ASDU) error {
 	}()
 
 	sf.Debug("ASDU %+v", asduPack)
+	sf.handler.ASDUHandlerAll(sf, asduPack, sf.serverNumber)
 
 	switch asduPack.Identifier.Type {
 	case asdu.C_IC_NA_1: // InterrogationCmd

@@ -33,7 +33,8 @@ type Server struct {
 	onConnection   func(asdu.Connect)
 	connectionLost func(asdu.Connect)
 	clog.Clog
-	wg sync.WaitGroup
+	wg           sync.WaitGroup
+	serverNumber int
 }
 
 // NewServer new a server, default config and default asdu.ParamsWide params
@@ -109,6 +110,7 @@ func (sf *Server) ListenAndServer(addr string) {
 				onConnection:   sf.onConnection,
 				connectionLost: sf.connectionLost,
 				Clog:           sf.Clog,
+				serverNumber:   sf.serverNumber,
 			}
 			sf.mux.Lock()
 			sf.sessions[sess] = struct{}{}
@@ -170,4 +172,8 @@ func (sf *Server) SetConnectionLostHandler(f func(asdu.Connect)) {
 // Get the number of sessions
 func (sf *Server) GetSessionsLen() int {
 	return len(sf.sessions)
+}
+
+func (sf *Server) SetServerNumber(n int) {
+	sf.serverNumber = n
 }
