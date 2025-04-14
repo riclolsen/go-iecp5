@@ -65,6 +65,7 @@ type Client struct {
 
 	onConnect        func(c *Client)
 	onConnectionLost func(c *Client)
+	onConnectTimeout func(c *Client)
 }
 
 // NewClient returns an IEC104 master,default config and default asdu.ParamsWide params
@@ -79,6 +80,7 @@ func NewClient(handler ClientHandlerInterface, o *ClientOption) *Client {
 		Clog:             clog.NewLogger("cs104 client => "),
 		onConnect:        func(*Client) {},
 		onConnectionLost: func(*Client) {},
+		onConnectTimeout: func(*Client) {},
 	}
 }
 
@@ -94,6 +96,14 @@ func (sf *Client) SetOnConnectHandler(f func(c *Client)) *Client {
 func (sf *Client) SetConnectionLostHandler(f func(c *Client)) *Client {
 	if f != nil {
 		sf.onConnectionLost = f
+	}
+	return sf
+}
+
+// SetConnectionLostHandler set connection lost handler
+func (sf *Client) SetConnectTimeoutHandler(f func(c *Client)) *Client {
+	if f != nil {
+		sf.onConnectTimeout = f
 	}
 	return sf
 }
@@ -132,6 +142,7 @@ func (sf *Client) running() {
 		conn, err := openConnection(sf.option.server, sf.option.TLSConfig, sf.option.config.ConnectTimeout0)
 		if err != nil {
 			sf.Error("connect failed, %v", err)
+			sf.onConnectTimeout(sf)
 			if !sf.option.autoReconnect {
 				return
 			}
