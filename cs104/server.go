@@ -68,9 +68,23 @@ func (sf *Server) SetParams(p *asdu.Params) *Server {
 	return sf
 }
 
+// SetTLSConfig set tls config
+func (sf *Server) SetTLSConfig(t *tls.Config) *Server {
+	sf.TLSConfig = t
+	return sf
+}
+
 // ListenAndServer run the server
 func (sf *Server) ListenAndServer(addr string) {
-	listen, err := net.Listen("tcp", addr)
+	var listen net.Listener
+	var err error
+
+	if sf.TLSConfig != nil {
+		listen, err = tls.Listen("tcp", addr, sf.TLSConfig)
+	} else {
+		listen, err = net.Listen("tcp", addr)
+	}
+
 	if err != nil {
 		sf.Critical("server run failed, %v", err)
 		os.Exit(1)

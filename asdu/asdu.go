@@ -30,8 +30,12 @@ const (
 var (
 	// ParamsNarrow is the smallest configuration.
 	ParamsNarrow = &Params{CauseSize: 1, CommonAddrSize: 1, InfoObjAddrSize: 1, InfoObjTimeZone: time.UTC}
+	// ParamsStandard is the standard configuration for IEC101.
+	ParamsStandard101 = &Params{CauseSize: 1, CommonAddrSize: 1, InfoObjAddrSize: 2, InfoObjTimeZone: time.UTC}
 	// ParamsWide is the largest configuration.
 	ParamsWide = &Params{CauseSize: 2, CommonAddrSize: 2, InfoObjAddrSize: 3, InfoObjTimeZone: time.UTC}
+	// ParamsStandard104 is the standard configuration for IEC104.
+	ParamsStandard104 = ParamsWide
 )
 
 // Params Defines specific parameters related to ASDU
