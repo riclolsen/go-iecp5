@@ -47,7 +47,7 @@ const (
 	MaxAPDULengthMax     = 253
 
 	TimeoutSendLinkMsgMin     = 1 * time.Millisecond
-	TimeoutSendLinkMsgMax     = 1000 * time.Millisecond
+	TimeoutSendLinkMsgMax     = 10000 * time.Millisecond
 	DefaultTimeoutSendLinkMsg = 200 * time.Millisecond
 
 	DefaultMaxSendQueueSize = 100 // Example value, can be adjusted

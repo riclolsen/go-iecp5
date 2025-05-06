@@ -11,7 +11,6 @@ import (
 )
 
 // ServerHandlerInterface is the interface of server (secondary station) handler
-// Note: Removed asdu.Connect parameter as it's less relevant for serial implementation details
 type ServerHandlerInterface interface {
 	InterrogationHandler(*asdu.ASDU, asdu.QualifierOfInterrogation) error
 	CounterInterrogationHandler(*asdu.ASDU, asdu.QualifierCountCall) error
@@ -24,7 +23,6 @@ type ServerHandlerInterface interface {
 }
 
 // ClientHandlerInterface is the interface of client (primary station) handler
-// Note: Removed asdu.Connect parameter
 type ClientHandlerInterface interface {
 	InterrogationHandler(*asdu.ASDU) error
 	CounterInterrogationHandler(*asdu.ASDU) error
