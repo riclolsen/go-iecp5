@@ -1064,11 +1064,12 @@ func (sf *Client) Send(a *asdu.ASDU) error {
 	}
 
 	sf.sendQueueMutex.Lock()
-	// If link is free (no outstanding confirmed frame) AND queue is empty, send immediately.
-	if sf.lastSentConfFrame == nil && len(sf.sendQueue) == 0 {
-		sf.sendQueueMutex.Unlock()
-		return sf._sendASDU(a)
-	}
+
+	//// If link is free (no outstanding confirmed frame) AND queue is empty, send immediately.
+	// if sf.lastSentConfFrame == nil && len(sf.sendQueue) == 0 {
+	// 	sf.sendQueueMutex.Unlock()
+	// 	return sf._sendASDU(a)
+	// }
 
 	// Otherwise, enqueue the ASDU.
 	if len(sf.sendQueue) >= sf.option.config.MaxSendQueueSize {
