@@ -303,11 +303,11 @@ func (sf *ASDU) UnmarshalBinary(rawAsdu []byte) error {
 	}
 	// information object
 	sf.infoObj = append(sf.bootstrap[lenDUI:lenDUI], rawAsdu[lenDUI:]...)
-	return sf.fixInfoObjSize()
+	return sf.FixInfoObjSize()
 }
 
-// fixInfoObjSize fix information object size
-func (sf *ASDU) fixInfoObjSize() error {
+// FixInfoObjSize fix information object size
+func (sf *ASDU) FixInfoObjSize() error {
 	// fixed element size
 	objSize, err := GetInfoObjSize(sf.Type)
 	if err != nil {
