@@ -639,3 +639,7 @@ func (sf *Client) SetPairedServer(s *Server) {
 func (sf *Client) SetClientNumber(n int) {
 	sf.clientNumber = n
 }
+
+func (sf *Client) ClientNumber() int {
+	return sf.clientNumber
+}

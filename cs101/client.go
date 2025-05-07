@@ -37,9 +37,10 @@ const (
 
 // Client is an IEC101 Primary Station (Master)
 type Client struct {
-	option  ClientOption
-	port    io.ReadWriteCloser // Serial port connection
-	handler ClientHandlerInterface
+	option       ClientOption
+	port         io.ReadWriteCloser // Serial port connection
+	handler      ClientHandlerInterface
+	clientNumber int
 
 	// Channels for internal communication
 	rcvFrame  chan *Frame     // Parsed incoming frames
@@ -711,7 +712,7 @@ func (sf *Client) callHandler(asduPack *asdu.ASDU) (err error) {
 
 	// Call the generic handler first
 	// Pass 0 for the unused int parameter (originally clientNumber/server context)
-	if handlerErr := sf.handler.ASDUHandlerAll(asduPack, 0); handlerErr != nil { // Removed sf argument
+	if handlerErr := sf.handler.ASDUHandlerAll(asduPack, sf.clientNumber); handlerErr != nil { // Removed sf argument
 		sf.Warn("Error in ASDUHandlerAll: %v", handlerErr)
 		// Decide if this error should prevent specific handlers from running
 	}
@@ -726,10 +727,10 @@ func (sf *Client) callHandler(asduPack *asdu.ASDU) (err error) {
 		// Check if typeID is an expected response type (M_ types)
 		// This check can be more specific if needed
 		if typeID >= asdu.M_SP_NA_1 && typeID <= asdu.M_EP_TF_1 {
-			err = sf.handler.InterrogationHandler(asduPack) // Removed sf argument
+			err = sf.handler.InterrogationHandler(asduPack)
 		} else {
 			sf.Warn("Received unexpected TypeID (%s) for Interrogation COT (%s)", typeID, cause)
-			err = sf.handler.ASDUHandler(asduPack, 0) // Removed sf argument // Fallback to generic
+			err = sf.handler.ASDUHandler(asduPack, sf.clientNumber) // Removed sf argument // Fallback to generic
 		}
 
 	// Counter Interrogation Responses
@@ -738,7 +739,7 @@ func (sf *Client) callHandler(asduPack *asdu.ASDU) (err error) {
 			err = sf.handler.CounterInterrogationHandler(asduPack) // Removed sf argument
 		} else {
 			sf.Warn("Received unexpected TypeID (%s) for Counter Interrogation COT (%s)", typeID, cause)
-			err = sf.handler.ASDUHandler(asduPack, 0) // Removed sf argument // Fallback to generic
+			err = sf.handler.ASDUHandler(asduPack, sf.clientNumber) // Removed sf argument // Fallback to generic
 		}
 
 	// Activation Confirmation / Termination
@@ -747,17 +748,17 @@ func (sf *Client) callHandler(asduPack *asdu.ASDU) (err error) {
 		if typeID >= asdu.C_SC_NA_1 && typeID <= asdu.C_BO_NA_1 {
 			// Handle confirmation/termination, maybe via generic handler or specific logic
 			sf.Debug("Received Activation Confirmation/Termination: %s", asduPack.Identifier)
-			err = sf.handler.ASDUHandler(asduPack, 0) // Removed sf argument // Use generic for now
+			err = sf.handler.ASDUHandler(asduPack, sf.clientNumber) // Removed sf argument // Use generic for now
 		} else {
 			sf.Warn("Received unexpected TypeID (%s) for ActivationCon/Term COT (%s)", typeID, cause)
-			err = sf.handler.ASDUHandler(asduPack, 0) // Removed sf argument // Fallback to generic
+			err = sf.handler.ASDUHandler(asduPack, sf.clientNumber) // Removed sf argument // Fallback to generic
 		}
 
 	// End of Initialization
 	case typeID == asdu.M_EI_NA_1 && cause == asdu.Initialized:
 		sf.Debug("Received End of Initialization from secondary station.") // Use Debug
 		// Potentially trigger interrogation or other actions
-		err = sf.handler.ASDUHandler(asduPack, 0) // Removed sf argument // Use generic handler for now
+		err = sf.handler.ASDUHandler(asduPack, sf.clientNumber) // Removed sf argument // Use generic handler for now
 
 	// --- Add handlers for other expected spontaneous data (M_ types with Spontaneous COT, etc.) ---
 	// case cause == asdu.Spontaneous && (typeID >= asdu.M_SP_NA_1 && typeID <= asdu.M_EP_TF_1):
@@ -765,7 +766,7 @@ func (sf *Client) callHandler(asduPack *asdu.ASDU) (err error) {
 
 	// Default to the generic handler for everything else
 	default:
-		err = sf.handler.ASDUHandler(asduPack, 0) // Removed sf argument
+		err = sf.handler.ASDUHandler(asduPack, sf.clientNumber) // Removed sf argument
 	}
 
 	return err
@@ -1383,4 +1384,12 @@ func (sf *Client) Params() *asdu.Params {
 // Return nil or a placeholder.
 func (sf *Client) UnderlyingConn() io.ReadWriteCloser {
 	return sf.port
+}
+
+func (sf *Client) SetClientNumber(n int) {
+	sf.clientNumber = n
+}
+
+func (sf *Client) ClientNumber() int {
+	return sf.clientNumber
 }
