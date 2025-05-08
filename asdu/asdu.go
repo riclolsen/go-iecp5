@@ -237,8 +237,8 @@ func (sf *ASDU) MarshalBinary() (data []byte, err error) {
 		return nil, ErrCauseZero
 	case !(sf.CauseSize == 1 || sf.CauseSize == 2):
 		return nil, ErrParam
-	case sf.CauseSize == 1 && sf.OrigAddr != 0:
-		return nil, ErrOriginAddrFit
+	//case sf.CauseSize == 1 && sf.OrigAddr != 0:
+	//	return nil, ErrOriginAddrFit
 	case sf.CommonAddr == InvalidCommonAddr:
 		return nil, ErrCommonAddrZero
 	case !(sf.CommonAddrSize == 1 || sf.CommonAddrSize == 2):
