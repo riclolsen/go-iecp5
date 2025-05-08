@@ -136,10 +136,10 @@ func main() {
 			}
 		}()
 	})
-	client.SetConnectionLostHandler(func(c *cs101.Client) {
+	client.SetConnectionLostHandler(func(c *cs101.Client, err error) {
 		fmt.Printf("CLIENT: Connection lost: %v\n", err)
 	})
-	client.SetConnectErrorHandler(func(c *cs101.Client) {
+	client.SetConnectErrorHandler(func(c *cs101.Client, err error) {
 		fmt.Printf("CLIENT: Connection error: %v\n", err)
 	})
 
