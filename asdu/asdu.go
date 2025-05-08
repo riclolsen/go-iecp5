@@ -247,7 +247,7 @@ func (sf *ASDU) MarshalBinary() (data []byte, err error) {
 		return nil, ErrParam
 	}
 
-	raw := sf.bootstrap[:(sf.IdentifierSize() + len(sf.InfoObj))]
+	raw := make([]byte, sf.IdentifierSize()+len(sf.InfoObj))
 	raw[0] = byte(sf.Type)
 	raw[1] = sf.Variable.Value()
 	raw[2] = sf.Coa.Value()
@@ -267,6 +267,10 @@ func (sf *ASDU) MarshalBinary() (data []byte, err error) {
 		offset++
 		raw[offset] = byte(sf.CommonAddr >> 8)
 	}
+
+	offsetInfoObj := 1 + 1 + sf.Params.CauseSize + sf.Params.CommonAddrSize
+	copy(data[offsetInfoObj:], sf.InfoObj)
+
 	return raw, nil
 }
 
