@@ -61,7 +61,7 @@ func TestASDU_GetEndOfInitialization(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			this := &ASDU{
 				Params:  tt.fields.Params,
-				infoObj: tt.fields.infoObj,
+				InfoObj: tt.fields.infoObj,
 			}
 			got, got1 := this.GetEndOfInitialization()
 			if got != tt.want {

@@ -300,7 +300,7 @@ func TestASDU_GetInterrogationCmd(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			this := &ASDU{
 				Params:  tt.fields.Params,
-				infoObj: tt.fields.infoObj,
+				InfoObj: tt.fields.infoObj,
 			}
 			got, got1 := this.GetInterrogationCmd()
 			if got != tt.want {
@@ -336,7 +336,7 @@ func TestASDU_GetCounterInterrogationCmd(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			this := &ASDU{
 				Params:  tt.fields.Params,
-				infoObj: tt.fields.infoObj,
+				InfoObj: tt.fields.infoObj,
 			}
 			got, got1 := this.GetCounterInterrogationCmd()
 			if got != tt.want {
@@ -369,7 +369,7 @@ func TestASDU_GetReadCmd(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			this := &ASDU{
 				Params:  tt.fields.Params,
-				infoObj: tt.fields.infoObj,
+				InfoObj: tt.fields.infoObj,
 			}
 			got := this.GetReadCmd()
 			if got != tt.want {
@@ -401,7 +401,7 @@ func TestASDU_GetClockSynchronizationCmd(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			this := &ASDU{
 				Params:  tt.fields.Params,
-				infoObj: tt.fields.infoObj,
+				InfoObj: tt.fields.infoObj,
 			}
 			got, got1 := this.GetClockSynchronizationCmd()
 			if got != tt.want {
@@ -436,7 +436,7 @@ func TestASDU_GetTestCommand(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			this := &ASDU{
 				Params:  tt.fields.Params,
-				infoObj: tt.fields.infoObj,
+				InfoObj: tt.fields.infoObj,
 			}
 			got, got1 := this.GetTestCommand()
 			if got != tt.want {
@@ -471,7 +471,7 @@ func TestASDU_GetResetProcessCmd(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			this := &ASDU{
 				Params:  tt.fields.Params,
-				infoObj: tt.fields.infoObj,
+				InfoObj: tt.fields.infoObj,
 			}
 			got, got1 := this.GetResetProcessCmd()
 			if got != tt.want {
@@ -506,7 +506,7 @@ func TestASDU_GetDelayAcquireCommand(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			this := &ASDU{
 				Params:  tt.fields.Params,
-				infoObj: tt.fields.infoObj,
+				InfoObj: tt.fields.infoObj,
 			}
 			got, got1 := this.GetDelayAcquireCommand()
 			if got != tt.want {
@@ -543,7 +543,7 @@ func TestASDU_GetTestCommandCP56Time2a(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			sf := &ASDU{
 				Params:  tt.fields.Params,
-				infoObj: tt.fields.infoObj,
+				InfoObj: tt.fields.infoObj,
 			}
 			got, got1, got2 := sf.GetTestCommandCP56Time2a()
 			if got != tt.want {

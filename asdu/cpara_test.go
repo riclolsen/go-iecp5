@@ -231,7 +231,7 @@ func TestASDU_GetParameterNormal(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			this := &ASDU{
 				Params:  tt.fields.Params,
-				infoObj: tt.fields.infoObj,
+				InfoObj: tt.fields.infoObj,
 			}
 			if got := this.GetParameterNormal(); !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("ASDU.GetParameterNormal() = %v, want %v", got, tt.want)
@@ -268,7 +268,7 @@ func TestASDU_GetParameterScaled(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			this := &ASDU{
 				Params:  tt.fields.Params,
-				infoObj: tt.fields.infoObj,
+				InfoObj: tt.fields.infoObj,
 			}
 			if got := this.GetParameterScaled(); !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("ASDU.GetParameterScaled() = %v, want %v", got, tt.want)
@@ -307,7 +307,7 @@ func TestASDU_GetParameterFloat(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			this := &ASDU{
 				Params:  tt.fields.Params,
-				infoObj: tt.fields.infoObj,
+				InfoObj: tt.fields.infoObj,
 			}
 			if got := this.GetParameterFloat(); !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("ASDU.GetParameterFloat() = %v, want %v", got, tt.want)
@@ -340,7 +340,7 @@ func TestASDU_GetParameterActivation(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			this := &ASDU{
 				Params:  tt.fields.Params,
-				infoObj: tt.fields.infoObj,
+				InfoObj: tt.fields.infoObj,
 			}
 			if got := this.GetParameterActivation(); !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("ASDU.GetParameterActivation() = %v, want %v", got, tt.want)

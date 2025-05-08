@@ -552,7 +552,7 @@ func TestASDU_GetSingleCmd(t *testing.T) {
 			sf := &ASDU{
 				Params:     tt.fields.Params,
 				Identifier: tt.fields.Identifier,
-				infoObj:    tt.fields.infoObj,
+				InfoObj:    tt.fields.infoObj,
 			}
 			got := sf.GetSingleCmd()
 			if !reflect.DeepEqual(got, tt.want) {
@@ -604,7 +604,7 @@ func TestASDU_GetDoubleCmd(t *testing.T) {
 			sf := &ASDU{
 				Params:     tt.fields.Params,
 				Identifier: tt.fields.Identifier,
-				infoObj:    tt.fields.infoObj,
+				InfoObj:    tt.fields.infoObj,
 			}
 			got := sf.GetDoubleCmd()
 			if !reflect.DeepEqual(got, tt.want) {
@@ -655,7 +655,7 @@ func TestASDU_GetStepCmd(t *testing.T) {
 			sf := &ASDU{
 				Params:     tt.fields.Params,
 				Identifier: tt.fields.Identifier,
-				infoObj:    tt.fields.infoObj,
+				InfoObj:    tt.fields.infoObj,
 			}
 			got := sf.GetStepCmd()
 			if !reflect.DeepEqual(got, tt.want) {
@@ -706,7 +706,7 @@ func TestASDU_GetSetpointNormalCmd(t *testing.T) {
 			sf := &ASDU{
 				Params:     tt.fields.Params,
 				Identifier: tt.fields.Identifier,
-				infoObj:    tt.fields.infoObj,
+				InfoObj:    tt.fields.infoObj,
 			}
 			got := sf.GetSetpointNormalCmd()
 			if !reflect.DeepEqual(got, tt.want) {
@@ -757,7 +757,7 @@ func TestASDU_GetSetpointCmdScaled(t *testing.T) {
 			sf := &ASDU{
 				Params:     tt.fields.Params,
 				Identifier: tt.fields.Identifier,
-				infoObj:    tt.fields.infoObj,
+				InfoObj:    tt.fields.infoObj,
 			}
 			got := sf.GetSetpointCmdScaled()
 			if !reflect.DeepEqual(got, tt.want) {
@@ -810,7 +810,7 @@ func TestASDU_GetSetpointFloatCmd(t *testing.T) {
 			sf := &ASDU{
 				Params:     tt.fields.Params,
 				Identifier: tt.fields.Identifier,
-				infoObj:    tt.fields.infoObj,
+				InfoObj:    tt.fields.infoObj,
 			}
 			got := sf.GetSetpointFloatCmd()
 			if !reflect.DeepEqual(got, tt.want) {
@@ -859,7 +859,7 @@ func TestASDU_GetBitsString32Cmd(t *testing.T) {
 			sf := &ASDU{
 				Params:     tt.fields.Params,
 				Identifier: tt.fields.Identifier,
-				infoObj:    tt.fields.infoObj,
+				InfoObj:    tt.fields.infoObj,
 			}
 			got := sf.GetBitsString32Cmd()
 			if !reflect.DeepEqual(got, tt.want) {

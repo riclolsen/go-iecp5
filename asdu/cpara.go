@@ -188,7 +188,7 @@ func (sf *ASDU) GetParameterNormal() ParameterNormalInfo {
 	return ParameterNormalInfo{
 		sf.DecodeInfoObjAddr(),
 		sf.DecodeNormalize(),
-		ParseQualifierOfParamMV(sf.infoObj[0]),
+		ParseQualifierOfParamMV(sf.InfoObj[0]),
 	}
 }
 
@@ -197,7 +197,7 @@ func (sf *ASDU) GetParameterScaled() ParameterScaledInfo {
 	return ParameterScaledInfo{
 		sf.DecodeInfoObjAddr(),
 		sf.DecodeScaled(),
-		ParseQualifierOfParamMV(sf.infoObj[0]),
+		ParseQualifierOfParamMV(sf.InfoObj[0]),
 	}
 }
 
@@ -206,7 +206,7 @@ func (sf *ASDU) GetParameterFloat() ParameterFloatInfo {
 	return ParameterFloatInfo{
 		sf.DecodeInfoObjAddr(),
 		sf.DecodeFloat32(),
-		ParseQualifierOfParamMV(sf.infoObj[0]),
+		ParseQualifierOfParamMV(sf.InfoObj[0]),
 	}
 }
 
@@ -214,6 +214,6 @@ func (sf *ASDU) GetParameterFloat() ParameterFloatInfo {
 func (sf *ASDU) GetParameterActivation() ParameterActivationInfo {
 	return ParameterActivationInfo{
 		sf.DecodeInfoObjAddr(),
-		QualifierOfParameterAct(sf.infoObj[0]),
+		QualifierOfParameterAct(sf.InfoObj[0]),
 	}
 }

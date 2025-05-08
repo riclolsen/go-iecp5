@@ -1387,7 +1387,7 @@ func TestASDU_GetSinglePoint(t *testing.T) {
 			this := &ASDU{
 				Params:     tt.fields.Params,
 				Identifier: tt.fields.Identifier,
-				infoObj:    tt.fields.infoObj,
+				InfoObj:    tt.fields.infoObj,
 			}
 			got := this.GetSinglePoint()
 			if !reflect.DeepEqual(got, tt.want) {
@@ -1427,7 +1427,7 @@ func TestASDU_GetSinglePointCP24Time2a(t *testing.T) {
 			this := &ASDU{
 				Params:     tt.fields.Params,
 				Identifier: tt.fields.Identifier,
-				infoObj:    tt.fields.infoObj,
+				InfoObj:    tt.fields.infoObj,
 			}
 			got := this.GetSinglePoint()
 			for i, v := range got {
@@ -1509,7 +1509,7 @@ func TestASDU_GetDoublePoint(t *testing.T) {
 			this := &ASDU{
 				Params:     tt.fields.Params,
 				Identifier: tt.fields.Identifier,
-				infoObj:    tt.fields.infoObj,
+				InfoObj:    tt.fields.infoObj,
 			}
 			if got := this.GetDoublePoint(); !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("ASDU.GetDoublePoint() = %v, want %v", got, tt.want)
@@ -1549,7 +1549,7 @@ func TestASDU_GetDoublePointCP24Time2a(t *testing.T) {
 			this := &ASDU{
 				Params:     tt.fields.Params,
 				Identifier: tt.fields.Identifier,
-				infoObj:    tt.fields.infoObj,
+				InfoObj:    tt.fields.infoObj,
 			}
 			got := this.GetDoublePoint()
 			for i, v := range got {
@@ -1631,7 +1631,7 @@ func TestASDU_GetStepPosition(t *testing.T) {
 			this := &ASDU{
 				Params:     tt.fields.Params,
 				Identifier: tt.fields.Identifier,
-				infoObj:    tt.fields.infoObj,
+				InfoObj:    tt.fields.infoObj,
 			}
 			if got := this.GetStepPosition(); !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("ASDU.GetStepPosition() = %v, want %v", got, tt.want)
@@ -1671,7 +1671,7 @@ func TestASDU_GetStepPositionCP24Time2a(t *testing.T) {
 			this := &ASDU{
 				Params:     tt.fields.Params,
 				Identifier: tt.fields.Identifier,
-				infoObj:    tt.fields.infoObj,
+				InfoObj:    tt.fields.infoObj,
 			}
 			got := this.GetStepPosition()
 			for i, v := range got {
@@ -1753,7 +1753,7 @@ func TestASDU_GetBitString32(t *testing.T) {
 			this := &ASDU{
 				Params:     tt.fields.Params,
 				Identifier: tt.fields.Identifier,
-				infoObj:    tt.fields.infoObj,
+				InfoObj:    tt.fields.infoObj,
 			}
 			if got := this.GetBitString32(); !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("ASDU.GetBitString32() = %v, want %v", got, tt.want)
@@ -1792,7 +1792,7 @@ func TestASDU_GetBitString32CP24Time2a(t *testing.T) {
 			this := &ASDU{
 				Params:     tt.fields.Params,
 				Identifier: tt.fields.Identifier,
-				infoObj:    tt.fields.infoObj,
+				InfoObj:    tt.fields.infoObj,
 			}
 			got := this.GetBitString32()
 			for i, v := range got {
@@ -1898,7 +1898,7 @@ func TestASDU_GetMeasuredValueNormal(t *testing.T) {
 			this := &ASDU{
 				Params:     tt.fields.Params,
 				Identifier: tt.fields.Identifier,
-				infoObj:    tt.fields.infoObj,
+				InfoObj:    tt.fields.infoObj,
 			}
 			if got := this.GetMeasuredValueNormal(); !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("ASDU.GetMeasuredValueNormal() = %v, want %v", got, tt.want)
@@ -1938,7 +1938,7 @@ func TestASDU_GetMeasuredValueNormalCP24Time2a(t *testing.T) {
 			this := &ASDU{
 				Params:     tt.fields.Params,
 				Identifier: tt.fields.Identifier,
-				infoObj:    tt.fields.infoObj,
+				InfoObj:    tt.fields.infoObj,
 			}
 			got := this.GetMeasuredValueNormal()
 			for i, v := range got {
@@ -2020,7 +2020,7 @@ func TestASDU_GetMeasuredValueScaled(t *testing.T) {
 			this := &ASDU{
 				Params:     tt.fields.Params,
 				Identifier: tt.fields.Identifier,
-				infoObj:    tt.fields.infoObj,
+				InfoObj:    tt.fields.infoObj,
 			}
 			if got := this.GetMeasuredValueScaled(); !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("ASDU.GetMeasuredValueScaled() = %v, want %v", got, tt.want)
@@ -2059,7 +2059,7 @@ func TestASDU_GetMeasuredValueScaledCP24Time2a(t *testing.T) {
 			this := &ASDU{
 				Params:     tt.fields.Params,
 				Identifier: tt.fields.Identifier,
-				infoObj:    tt.fields.infoObj,
+				InfoObj:    tt.fields.infoObj,
 			}
 			got := this.GetMeasuredValueScaled()
 			for i, v := range got {
@@ -2147,7 +2147,7 @@ func TestASDU_GetMeasuredValueFloat(t *testing.T) {
 			this := &ASDU{
 				Params:     tt.fields.Params,
 				Identifier: tt.fields.Identifier,
-				infoObj:    tt.fields.infoObj,
+				InfoObj:    tt.fields.infoObj,
 			}
 			if got := this.GetMeasuredValueFloat(); !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("ASDU.GetMeasuredValueFloat() = %v, want %v", got, tt.want)
@@ -2188,7 +2188,7 @@ func TestASDU_GetMeasuredValueFloatCP24Time2a(t *testing.T) {
 			this := &ASDU{
 				Params:     tt.fields.Params,
 				Identifier: tt.fields.Identifier,
-				infoObj:    tt.fields.infoObj,
+				InfoObj:    tt.fields.infoObj,
 			}
 			got := this.GetMeasuredValueFloat()
 			for i, v := range got {
