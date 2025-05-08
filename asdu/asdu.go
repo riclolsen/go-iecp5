@@ -268,8 +268,7 @@ func (sf *ASDU) MarshalBinary() (data []byte, err error) {
 		raw[offset] = byte(sf.CommonAddr >> 8)
 	}
 
-	offsetInfoObj := 1 + 1 + sf.Params.CauseSize + sf.Params.CommonAddrSize
-	copy(data[offsetInfoObj:], sf.InfoObj)
+	copy(raw[sf.IdentifierSize():], sf.InfoObj)
 
 	return raw, nil
 }
