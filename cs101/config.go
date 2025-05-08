@@ -35,9 +35,9 @@ const (
 	TimeoutTestT3Min     = 1 * time.Second
 	TimeoutTestT3Max     = 172800 * time.Second // 48 hours
 
-	// Default Link Address size (1 or 2 octets, 0 for structured/unused)
+	// Default Link Address size (1 or 2 octets)
 	DefaultLinkAddrSize = 1
-	LinkAddrSizeMin     = 0
+	LinkAddrSizeMin     = 1
 	LinkAddrSizeMax     = 2
 
 	// Default Max length of APDU (Application Protocol Data Unit)
@@ -69,11 +69,11 @@ type Config struct {
 
 	// --- ASDU Address Configuration (from asdu package) ---
 	// Common Address size in octets (1 or 2)
-	CommonAddrSize byte
+	//CommonAddrSize byte
 	// Cause of Transmission size in octets (1 or 2)
-	CotSize byte
+	//CotSize byte
 	// Information Object Address size in octets (1, 2, or 3)
-	InfoObjAddrSize byte
+	//InfoObjAddrSize byte
 
 	// --- Timeouts ---
 	// Timeout waiting for ACK/response from secondary station (master side)
@@ -119,7 +119,7 @@ func (sf *Config) Valid() error {
 
 	// Validate Link Address Size
 	if sf.LinkAddrSize < LinkAddrSizeMin || sf.LinkAddrSize > LinkAddrSizeMax {
-		return errors.New("link address size must be 0, 1, or 2")
+		return errors.New("link address size must be 1 or 2")
 	}
 	// Validate Link Address value based on size
 	if sf.LinkAddrSize == 1 && sf.LinkAddress > 0xFF {
@@ -127,32 +127,6 @@ func (sf *Config) Valid() error {
 	}
 	// If LinkAddrSize is 2, LinkAddress can be up to 0xFFFF (uint16 max)
 	// If LinkAddrSize is 0, LinkAddress should ideally be 0, but depends on usage.
-
-	// Validate ASDU Address Sizes (must be 1 or 2 for CommonAddr/COT, 1, 2 or 3 for IOA)
-	if sf.CommonAddrSize != 1 && sf.CommonAddrSize != 2 {
-		// Default if not set
-		if sf.CommonAddrSize == 0 {
-			sf.CommonAddrSize = 1 // Default Common Address Size
-		} else {
-			return errors.New("invalid common address size, must be 1 or 2")
-		}
-	}
-	if sf.CotSize != 1 && sf.CotSize != 2 {
-		// Default if not set
-		if sf.CotSize == 0 {
-			sf.CotSize = 1 // Default COT Size
-		} else {
-			return errors.New("invalid cause of transmission size, must be 1 or 2")
-		}
-	}
-	if sf.InfoObjAddrSize != 1 && sf.InfoObjAddrSize != 2 && sf.InfoObjAddrSize != 3 {
-		// Default if not set
-		if sf.InfoObjAddrSize == 0 {
-			sf.InfoObjAddrSize = 2 // Default IOA Size (Example, adjust if needed)
-		} else {
-			return errors.New("invalid information object address size, must be 1, 2 or 3")
-		}
-	}
 
 	// Validate and default Timeouts
 	if sf.TimeoutResponseT1 == 0 {
@@ -205,9 +179,6 @@ func DefaultConfig() Config {
 		Mode:               ModeUnbalanced, // Common default
 		LinkAddress:        1,              // Example link address
 		LinkAddrSize:       DefaultLinkAddrSize,
-		CommonAddrSize:     1, // Default Common Address Size
-		CotSize:            1, // Default COT Size
-		InfoObjAddrSize:    2, // Default IOA Size (Example, adjust if needed)
 		TimeoutResponseT1:  DefaultTimeoutResponseT1,
 		TimeoutRepeatT2:    DefaultTimeoutRepeatT2,
 		TimeoutTestT3:      DefaultTimeoutTestT3,

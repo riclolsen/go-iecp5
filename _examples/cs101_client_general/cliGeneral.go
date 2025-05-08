@@ -86,19 +86,24 @@ func main() {
 	}
 
 	// Client options using default CS101 parameters
-	opt := cs101.NewOption()
+	option := cs101.NewOption()
+	params := asdu.ParamsStandard101
+	params.CommonAddrSize = 1
+	params.CauseSize = 1
+	params.InfoObjAddrSize = 2
+	params.OrigAddress = 1
+	option.SetParams(params)
+	option.SetAutoReconnect(false) // disable auto reconnect (we will handle it)
+
 	cfg := cs101.DefaultConfig()
 	cfg.Serial = serialCfg
 	cfg.LinkAddress = 1 // Address of the secondary station we want to talk to
-	cfg.LinkAddrSize = 1
-	cfg.CommonAddrSize = 1
-	cfg.CotSize = 1
-	cfg.InfoObjAddrSize = 2
 	cfg.TimeoutSendLinkMsg = 50 * time.Millisecond
-	opt.SetConfig(cfg)
+	option.SetConfig(cfg)
+	option.SetSerialConfig(serialCfg)
 
 	handler := &MyClientHandler{}
-	client := cs101.NewClient(handler, opt)
+	client := cs101.NewClient(handler, option)
 	if client == nil {
 		log.Fatalf("Failed to create client. Check serial port configuration.")
 	}

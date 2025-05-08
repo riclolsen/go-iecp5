@@ -27,7 +27,7 @@ type ClientOption struct {
 func NewOption() *ClientOption {
 	return &ClientOption{
 		DefaultConfig(),
-		*asdu.ParamsWide,
+		*asdu.ParamsStandard104,
 		nil,
 		true,
 		DefaultReconnectInterval,
