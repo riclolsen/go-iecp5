@@ -193,6 +193,7 @@ func (sf *Client) connectionManager() {
 			StopBits:    sf.option.config.Serial.StopBits,       // StopBits
 		}
 		port, err := serial.OpenPort(serialCfg)
+		defer sf.port.Close()
 		// --- End serial port opening ---
 
 		if err != nil {
