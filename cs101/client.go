@@ -213,8 +213,10 @@ func (sf *Client) connectionManager() {
 		sf.Debug("Serial port %s connected successfully", sf.option.config.Serial.Address) // Use Debug
 		sf.port = port
 		defer func() {
-			sf.port.Close()
-			sf.port = nil
+			if sf.port != nil {
+				sf.port.Close()
+				sf.port = nil
+			}
 		}()
 		sf.setConnectStatus(statusConnected)
 
