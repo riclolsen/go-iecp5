@@ -155,6 +155,7 @@ func (sf *Client) Start() error {
 		sf.rwMux.Unlock()
 		return errors.New("client already started or starting")
 	}
+	sf.lastSentConfFrame = nil
 	sf.connStatus = statusConnecting // Mark as starting
 	sf.ctx, sf.cancel = context.WithCancel(context.Background())
 	sf.rwMux.Unlock()
@@ -790,7 +791,8 @@ func (sf *Client) IsLinkActive() bool {
 // Close disconnects the client and stops all background goroutines.
 func (sf *Client) Close() error {
 	sf.rwMux.Lock()
-	if sf.cancel == nil { // Already closed or never started
+	sf.lastSentConfFrame = nil // Clear any pending confirmation
+	if sf.cancel == nil {      // Already closed or never started
 		sf.rwMux.Unlock()
 		return errors.New("client not running")
 	}
