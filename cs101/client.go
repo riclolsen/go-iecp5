@@ -193,7 +193,6 @@ func (sf *Client) connectionManager() {
 			StopBits:    sf.option.config.Serial.StopBits,       // StopBits
 		}
 		port, err := serial.OpenPort(serialCfg)
-		defer sf.port.Close()
 		// --- End serial port opening ---
 
 		if err != nil {
@@ -213,6 +212,7 @@ func (sf *Client) connectionManager() {
 
 		sf.Debug("Serial port %s connected successfully", sf.option.config.Serial.Address) // Use Debug
 		sf.port = port
+		defer sf.port.Close()
 		sf.setConnectStatus(statusConnected)
 
 		// Create a context for this specific connection attempt
