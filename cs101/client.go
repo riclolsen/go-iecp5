@@ -791,8 +791,9 @@ func (sf *Client) IsLinkActive() bool {
 // Close disconnects the client and stops all background goroutines.
 func (sf *Client) Close() error {
 	sf.rwMux.Lock()
-	sf.lastSentConfFrame = nil // Clear any pending confirmation
-	if sf.cancel == nil {      // Already closed or never started
+	sf.setConnectStatus(statusInitial) // Set status to initial
+	sf.lastSentConfFrame = nil         // Clear any pending confirmation
+	if sf.cancel == nil {              // Already closed or never started
 		sf.rwMux.Unlock()
 		return errors.New("client not running")
 	}
