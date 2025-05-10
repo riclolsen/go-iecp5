@@ -5,6 +5,7 @@
 package cs101
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -188,8 +189,7 @@ func calculateChecksum(control byte, linkAddr []byte, asdu []byte) byte {
 // ParseFrame attempts to parse a CS101 frame from a reader.
 // It requires the link address size from the configuration.
 // Returns the parsed frame or an error.
-// TODO: Implement robust parsing logic handling timeouts and byte-by-byte reading.
-func ParseFrame(r io.Reader, linkAddrSize byte) (*Frame, error) {
+func ParseFrame(r io.Reader, linkAddrSize byte, ctx *context.Context) (*Frame, error) {
 	if linkAddrSize > 2 {
 		return nil, ErrInvalidLinkAddrLen
 	}
@@ -200,7 +200,21 @@ func ParseFrame(r io.Reader, linkAddrSize byte) (*Frame, error) {
 
 	// 1. Read Start Byte
 	startByte := make([]byte, 1)
-	if _, err := io.ReadFull(r, startByte); err != nil {
+
+	// Helper function to read with context check.
+	// ctx is a pointer to a context.Context.
+	readFullWithCtxCheck := func(reader io.Reader, buffer []byte) (int, error) {
+		if ctx != nil { // Check if the context pointer itself is provided
+			select {
+			case <-(*ctx).Done(): // If provided, check if the context it points to is done
+				return 0, (*ctx).Err()
+			default:
+			}
+		}
+		return io.ReadFull(reader, buffer)
+	}
+
+	if _, err := readFullWithCtxCheck(r, startByte); err != nil {
 		return nil, fmt.Errorf("reading start byte: %w", err)
 	}
 
@@ -211,7 +225,7 @@ func ParseFrame(r io.Reader, linkAddrSize byte) (*Frame, error) {
 		// Read Control + LinkAddr (optional) + Checksum + End
 		fixedLen := 1 + int(linkAddrSize) + 1 + 1 // Control + LinkAddr + Checksum + End
 		fixedData := make([]byte, fixedLen)
-		if _, err := io.ReadFull(r, fixedData); err != nil {
+		if _, err := readFullWithCtxCheck(r, fixedData); err != nil {
 			return nil, fmt.Errorf("reading fixed frame data: %w", err)
 		}
 		frame.Control = fixedData[0]
@@ -232,7 +246,7 @@ func ParseFrame(r io.Reader, linkAddrSize byte) (*Frame, error) {
 	case StartVariable: // Variable Length Frame (contains ASDU)
 		// Read Length1, Length2, Control
 		header := make([]byte, 4)
-		if _, err := io.ReadFull(r, header); err != nil {
+		if _, err := readFullWithCtxCheck(r, header); err != nil {
 			return nil, fmt.Errorf("reading variable frame header: %w", err)
 		}
 		frame.Length1 = header[0]
@@ -255,7 +269,7 @@ func ParseFrame(r io.Reader, linkAddrSize byte) (*Frame, error) {
 		// Read LinkAddr + ASDU + Checksum + End
 		bodyLen := -1 + int(frame.Length1) + 1 + 1 // (-Control) + LinkAddr + ASDU + Checksum + End
 		bodyData := make([]byte, bodyLen)
-		if _, err := io.ReadFull(r, bodyData); err != nil {
+		if _, err := readFullWithCtxCheck(r, bodyData); err != nil {
 			return nil, fmt.Errorf("reading variable frame body: %w", err)
 		}
 		frame.LinkAddr = bodyData[0:linkAddrSize]

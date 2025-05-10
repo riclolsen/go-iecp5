@@ -212,7 +212,10 @@ func (sf *Client) connectionManager() {
 
 		sf.Debug("Serial port %s connected successfully", sf.option.config.Serial.Address) // Use Debug
 		sf.port = port
-		defer sf.port.Close()
+		defer func() {
+			sf.port.Close()
+			sf.port = nil
+		}()
 		sf.setConnectStatus(statusConnected)
 
 		// Create a context for this specific connection attempt
@@ -620,7 +623,7 @@ func (sf *Client) frameRecvLoop() {
 			return
 		default:
 			// Use ParseFrame which handles reading internally (simplified version)
-			frame, err := ParseFrame(sf.port, sf.option.config.LinkAddrSize)
+			frame, err := ParseFrame(sf.port, sf.option.config.LinkAddrSize, &sf.connCtx)
 			if err != nil {
 				// Handle different error types
 				if errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe) || (err.Error() == "serial: port closed") {

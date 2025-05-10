@@ -184,7 +184,7 @@ func (sf *Server) frameRecvLoop() {
 		case <-sf.connCtx.Done():
 			return
 		default:
-			frame, err := ParseFrame(sf.port, sf.config.LinkAddrSize)
+			frame, err := ParseFrame(sf.port, sf.config.LinkAddrSize, &sf.connCtx)
 			if err != nil {
 				if errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe) || (err.Error() == "serial: port closed") {
 					sf.Debug("Serial port closed or EOF.")
