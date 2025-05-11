@@ -194,25 +194,28 @@ func ParseFrame(r io.Reader, linkAddrSize byte, ctx *context.Context) (*Frame, e
 		return nil, ErrInvalidLinkAddrLen
 	}
 
-	// --- This is a simplified placeholder for parsing ---
-	// A real implementation needs careful byte-by-byte reading, timeout handling,
-	// and state management to correctly identify frame boundaries and types.
-
-	// 1. Read Start Byte
-	startByte := make([]byte, 1)
-
 	// Helper function to read with context check.
 	// ctx is a pointer to a context.Context.
 	readFullWithCtxCheck := func(reader io.Reader, buffer []byte) (int, error) {
-		if ctx != nil { // Check if the context pointer itself is provided
-			select {
-			case <-(*ctx).Done(): // If provided, check if the context it points to is done
-				return 0, (*ctx).Err()
-			default:
-			}
+		done := make(chan struct{})
+		var n int
+		var err error
+
+		go func() {
+			n, err = io.ReadFull(reader, buffer)
+			close(done)
+		}()
+
+		select {
+		case <-(*ctx).Done():
+			return 0, errors.New("read cancelled")
+		case <-done:
+			return n, err
 		}
-		return io.ReadFull(reader, buffer)
 	}
+
+	// 1. Read Start Byte
+	startByte := make([]byte, 1)
 
 	if _, err := readFullWithCtxCheck(r, startByte); err != nil {
 		return nil, fmt.Errorf("reading start byte: %w", err)
