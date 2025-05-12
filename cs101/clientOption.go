@@ -30,31 +30,31 @@ func NewOption() *ClientOption {
 }
 
 // SetConfig sets the main CS101 configuration. Uses DefaultConfig() if the provided cfg is invalid.
-func (sf *ClientOption) SetConfig(cfg Config) *ClientOption {
-	if err := cfg.Valid(); err != nil {
+func (sf *ClientOption) SetConfig(cfg Config) (err error) {
+	if err = cfg.Valid(); err != nil {
 		sf.config = DefaultConfig()
 	} else {
 		sf.config = cfg
 	}
-	return sf
+	return
 }
 
 // SetSerialConfig sets the serial port configuration within the main config.
-func (sf *ClientOption) SetSerialConfig(serialCfg SerialConfig) *ClientOption {
+func (sf *ClientOption) SetSerialConfig(serialCfg SerialConfig) (err error) {
 	sf.config.Serial = serialCfg
 	// TODO: Optionally re-validate the main config here?
-	// if err := sf.config.Valid(); err != nil { ... }
-	return sf
+	// if err = sf.config.Valid(); err != nil { ... }
+	return
 }
 
 // SetParams sets the ASDU parameters. Uses asdu.ParamsStandard101 if the provided p is invalid.
-func (sf *ClientOption) SetParams(p *asdu.Params) *ClientOption {
-	if err := p.Valid(); err != nil {
+func (sf *ClientOption) SetParams(p *asdu.Params) (err error) {
+	if err = p.Valid(); err != nil {
 		sf.params = *asdu.ParamsStandard101
 	} else {
 		sf.params = *p
 	}
-	return sf
+	return
 }
 
 // SetReconnectInterval sets the interval for attempting reconnection after a connection failure.

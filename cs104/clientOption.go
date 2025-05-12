@@ -36,23 +36,23 @@ func NewOption() *ClientOption {
 }
 
 // SetConfig set config if config is valid it will use DefaultConfig()
-func (sf *ClientOption) SetConfig(cfg Config) *ClientOption {
-	if err := cfg.Valid(); err != nil {
+func (sf *ClientOption) SetConfig(cfg Config) (err error) {
+	if err = cfg.Valid(); err != nil {
 		sf.config = DefaultConfig()
 	} else {
 		sf.config = cfg
 	}
-	return sf
+	return
 }
 
 // SetParams set asdu params if params is valid it will use asdu.ParamsWide
-func (sf *ClientOption) SetParams(p *asdu.Params) *ClientOption {
-	if err := p.Valid(); err != nil {
+func (sf *ClientOption) SetParams(p *asdu.Params) (err error) {
+	if err = p.Valid(); err != nil {
 		sf.params = *asdu.ParamsWide
 	} else {
 		sf.params = *p
 	}
-	return sf
+	return
 }
 
 // SetReconnectInterval set tcp  reconnect the host interval when connect failed after try
