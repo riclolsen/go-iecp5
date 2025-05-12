@@ -92,7 +92,6 @@ func main() {
 	params.CauseSize = 1
 	params.InfoObjAddrSize = 2
 	params.OrigAddress = 1
-	option.SetSerialConfig(serialCfg)
 	option.SetParams(params)
 	option.SetAutoReconnect(false) // disable auto reconnect (we will handle it)
 

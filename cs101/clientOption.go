@@ -39,14 +39,6 @@ func (sf *ClientOption) SetConfig(cfg Config) (err error) {
 	return
 }
 
-// SetSerialConfig sets the serial port configuration within the main config.
-func (sf *ClientOption) SetSerialConfig(serialCfg SerialConfig) (err error) {
-	sf.config.Serial = serialCfg
-	// TODO: Optionally re-validate the main config here?
-	// if err = sf.config.Valid(); err != nil { ... }
-	return
-}
-
 // SetParams sets the ASDU parameters. Uses asdu.ParamsStandard101 if the provided p is invalid.
 func (sf *ClientOption) SetParams(p *asdu.Params) (err error) {
 	if err = p.Valid(); err != nil {
