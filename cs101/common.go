@@ -7,7 +7,7 @@ package cs101
 import (
 	"time"
 
-	"github.com/tarm/serial" // Import the serial library used
+	"go.bug.st/serial"
 )
 
 // DefaultReconnectInterval defined default value
@@ -28,9 +28,9 @@ type SerialConfig struct {
 	BaudRate int
 	// DataBits is the number of data bits (usually 7 or 8).
 	DataBits int // Usually 8 for IEC 60870-5
-	// StopBits specifies the number of stop bits. Use serial.Stop1 or serial.Stop2.
+	// StopBits specifies the number of stop bits. Use serial.OneStopBit or serial.TwoStopBits.
 	StopBits serial.StopBits
-	// Parity specifies the parity mode. Use serial.ParityNone, serial.ParityOdd, serial.ParityEven.
+	// Parity specifies the parity mode. Use serial.NoParity, serial.OddParity, serial.EvenParity.
 	Parity serial.Parity
 	// Timeout specifies the read/write timeout for the serial port. 0 means no timeout.
 	Timeout time.Duration
@@ -38,23 +38,23 @@ type SerialConfig struct {
 
 // mapParity maps a byte representation to serial.Parity.
 // Used for transitioning from placeholder values if needed, or for validation.
-// 0 = None, 1 = Odd, 2 = Even. Returns ParityNone for invalid values.
+// 0 = None, 1 = Odd, 2 = Even. Returns NoParity for invalid values.
 func mapParity(p byte) serial.Parity {
 	switch p {
 	case 1:
-		return serial.ParityOdd
+		return serial.OddParity
 	case 2:
-		return serial.ParityEven
+		return serial.EvenParity
 	default: // Includes 0
-		return serial.ParityNone
+		return serial.NoParity
 	}
 }
 
 // mapStopBits maps a byte representation to serial.StopBits.
-// 1 = OneStopBit, 2 = TwoStopBits. Returns Stop1 for invalid values.
+// 1 = OneStopBit, 2 = TwoStopBits. Returns OneStopBit for invalid values.
 func mapStopBits(s byte) serial.StopBits {
 	if s == 2 {
-		return serial.Stop2
+		return serial.TwoStopBits
 	}
-	return serial.Stop1 // Default includes 1
+	return serial.OneStopBit // Default includes 1
 }

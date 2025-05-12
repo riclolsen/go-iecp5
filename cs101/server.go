@@ -15,7 +15,7 @@ import (
 
 	"github.com/riclolsen/go-iecp5/asdu"
 	"github.com/riclolsen/go-iecp5/clog"
-	"github.com/tarm/serial"
+	"go.bug.st/serial"
 )
 
 // Server represents an IEC101 Secondary Station (Slave)
@@ -130,17 +130,19 @@ func (sf *Server) run() {
 
 	// --- Open Serial Port ---
 	sf.Debug("Opening serial port %s...", sf.config.Serial.Address)
-	serialCfg := &serial.Config{
-		Name:        sf.config.Serial.Address,
-		Baud:        sf.config.Serial.BaudRate,
-		ReadTimeout: sf.config.Serial.Timeout,
-		Size:        byte(sf.config.Serial.DataBits), // DataBits (Size expects byte)
-		Parity:      sf.config.Serial.Parity,         // Parity
-		StopBits:    sf.config.Serial.StopBits,       // StopBits
+	mode := &serial.Mode{
+		BaudRate: sf.config.Serial.BaudRate,
+		DataBits: sf.config.Serial.DataBits,
+		Parity:   sf.config.Serial.Parity,
+		StopBits: sf.config.Serial.StopBits,
 	}
-	port, err := serial.OpenPort(serialCfg)
+	port, err := serial.Open(sf.config.Serial.Address, mode)
+	if err == nil && sf.config.Serial.Timeout > 0 {
+		err = port.SetReadTimeout(sf.config.Serial.Timeout)
+	}
+
 	if err != nil {
-		sf.Error("Failed to open serial port %s: %v", sf.config.Serial.Address, err)
+		sf.Error("Failed to open serial port %s or set timeout: %v", sf.config.Serial.Address, err)
 		sf.setConnectStatus(statusDisconnected)
 		// Consider adding an error callback here if needed
 		return // Cannot proceed without the port
@@ -186,10 +188,12 @@ func (sf *Server) frameRecvLoop() {
 		default:
 			frame, err := ParseFrame(sf.port, sf.config.LinkAddrSize, &sf.connCtx)
 			if err != nil {
-				if errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe) || (err.Error() == "serial: port closed") {
+				// Similar to client.go, adjust error checking for go.bug.st/serial
+				if errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe) {
 					sf.Debug("Serial port closed or EOF.")
 					return
 				}
+				// Add more specific error checks for go.bug.st/serial if known
 				if errors.Is(err, ErrChecksumMismatch) || errors.Is(err, ErrInvalidStartChar) || errors.Is(err, ErrLengthMismatch) {
 					sf.Warn("Frame parsing error: %v. Attempting recovery.", err)
 					continue

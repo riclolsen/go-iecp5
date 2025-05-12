@@ -10,7 +10,7 @@ import (
 
 	"github.com/riclolsen/go-iecp5/asdu"
 	"github.com/riclolsen/go-iecp5/cs101"
-	"github.com/tarm/serial" // Ensure this matches the import in cs101/common.go
+	"go.bug.st/serial"
 )
 
 // MyClientHandler implements the cs101.ClientHandlerInterface
@@ -80,8 +80,8 @@ func main() {
 		Address:  serialPortAddress,
 		BaudRate: 9600,
 		DataBits: 8,
-		StopBits: serial.Stop1,
-		Parity:   serial.ParityEven, // Common for IEC 101
+		StopBits: serial.OneStopBit,
+		Parity:   serial.EvenParity, // Common for IEC 101
 		Timeout:  5 * time.Second,   // Read timeout
 	}
 

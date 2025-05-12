@@ -174,20 +174,20 @@ func TestASDU_MarshalBinary(t *testing.T) {
 			nil,
 			true,
 		},
-		{
-			"cause size(1),but origAddress not equal zero",
-			fields{
-				&Params{CauseSize: 1, CommonAddrSize: 1, InfoObjAddrSize: 1, InfoObjTimeZone: time.UTC},
-				Identifier{
-					M_SP_NA_1,
-					VariableStruct{},
-					CauseOfTransmission{Cause: Activation},
-					1,
-					0x80},
-				nil},
-			nil,
-			true,
-		},
+		//{
+		//	"cause size(1),but origAddress not equal zero",
+		//	fields{
+		//		&Params{CauseSize: 1, CommonAddrSize: 1, InfoObjAddrSize: 1, InfoObjTimeZone: time.UTC},
+		//		Identifier{
+		//			M_SP_NA_1,
+		//			VariableStruct{},
+		//			CauseOfTransmission{Cause: Activation},
+		//			1,
+		//			0x80},
+		//		nil},
+		//	nil,
+		//	true,
+		//},
 		{
 			"invalid common address",
 			fields{

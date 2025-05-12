@@ -17,8 +17,7 @@ import (
 	"github.com/riclolsen/go-iecp5/asdu"
 	"github.com/riclolsen/go-iecp5/clog"
 
-	// Import a serial library, e.g., tarm/serial (already in go.mod)
-	"github.com/tarm/serial" // Using tarm/serial as an example
+	"go.bug.st/serial"
 )
 
 // Connection states
@@ -183,20 +182,21 @@ func (sf *Client) connectionManager() {
 		sf.Debug("Connecting to serial port %s...", sf.option.config.Serial.Address) // Use Debug
 
 		// --- Attempt to open serial port ---
-		// Example using tarm/serial
-		serialCfg := &serial.Config{
-			Name:        sf.option.config.Serial.Address,
-			Baud:        sf.option.config.Serial.BaudRate,
-			ReadTimeout: sf.option.config.Serial.Timeout,
-			Size:        byte(sf.option.config.Serial.DataBits), // DataBits (Size expects byte)
-			Parity:      sf.option.config.Serial.Parity,         // Parity
-			StopBits:    sf.option.config.Serial.StopBits,       // StopBits
+		// Using go.bug.st/serial
+		mode := &serial.Mode{
+			BaudRate: sf.option.config.Serial.BaudRate,
+			DataBits: sf.option.config.Serial.DataBits,
+			Parity:   sf.option.config.Serial.Parity,
+			StopBits: sf.option.config.Serial.StopBits,
 		}
-		port, err := serial.OpenPort(serialCfg)
+		port, err := serial.Open(sf.option.config.Serial.Address, mode)
+		if err == nil && sf.option.config.Serial.Timeout > 0 { // Set read timeout if specified
+			err = port.SetReadTimeout(sf.option.config.Serial.Timeout)
+		}
 		// --- End serial port opening ---
 
 		if err != nil {
-			sf.Error("Failed to open serial port %s: %v", sf.option.config.Serial.Address, err)
+			sf.Error("Failed to open serial port %s or set timeout: %v", sf.option.config.Serial.Address, err)
 			sf.setConnectStatus(statusDisconnected)
 			sf.onConnectError(sf, err)
 			if !sf.option.autoReconnect {
@@ -628,10 +628,21 @@ func (sf *Client) frameRecvLoop() {
 			frame, err := ParseFrame(sf.port, sf.option.config.LinkAddrSize, &sf.connCtx)
 			if err != nil {
 				// Handle different error types
-				if errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe) || (err.Error() == "serial: port closed") {
+				// Check for specific error strings if go.bug.st/serial provides them,
+				// otherwise, io.EOF and io.ErrClosedPipe are standard.
+				// The error "serial: port closed" is specific to tarm/serial.
+				// go.bug.st/serial might return different errors for closed ports,
+				// often syscall.EINVAL or similar on some platforms after closing.
+				// For now, we'll keep io.EOF and io.ErrClosedPipe.
+				// A common error from go.bug.st/serial on read from a closed port is often io.EOF or a system-specific error.
+				if errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe) {
 					sf.Debug("Serial port closed or EOF reached.") // Use Debug
 					return                                         // Normal closure or disconnect
 				}
+				// Add more specific error checks for go.bug.st/serial if known, e.g.
+				// if se, ok := err.(*serial.PortError); ok {
+				//     // Handle serial.PortError
+				// }
 				// Checksum/framing errors might be recoverable or indicate noise
 				if errors.Is(err, ErrChecksumMismatch) || errors.Is(err, ErrInvalidStartChar) || errors.Is(err, ErrLengthMismatch) {
 					sf.Warn("Frame parsing error: %v. Attempting to recover.", err)
