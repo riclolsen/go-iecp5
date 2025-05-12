@@ -92,6 +92,7 @@ func main() {
 	params.CauseSize = 1
 	params.InfoObjAddrSize = 2
 	params.OrigAddress = 1
+	option.SetSerialConfig(serialCfg)
 	option.SetParams(params)
 	option.SetAutoReconnect(false) // disable auto reconnect (we will handle it)
 
@@ -100,7 +101,6 @@ func main() {
 	cfg.LinkAddress = 1 // Address of the secondary station we want to talk to
 	cfg.TimeoutSendLinkMsg = 50 * time.Millisecond
 	option.SetConfig(cfg)
-	option.SetSerialConfig(serialCfg)
 
 	handler := &MyClientHandler{}
 	client := cs101.NewClient(handler, option)
