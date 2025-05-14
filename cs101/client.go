@@ -366,7 +366,11 @@ func (sf *Client) runProtocol() error {
 
 		case frame := <-sf.rcvFrame:
 			sf.lastRecvTime = time.Now() // Update last receive time
-			sf.Debug("Received Frame: Start=0x%02X, Ctrl=%s, LinkAddr=%X", frame.Start, frame.GetControlField(), frame.LinkAddr)
+			if frame.Start == SingleCharAck {
+				sf.Debug("Received Single Char ACK")
+			} else {
+				sf.Debug("Received Frame: Start=0x%02X, Ctrl=%s, LinkAddr=%X", frame.Start, frame.GetControlField(), frame.LinkAddr)
+			}
 
 			// Stop T1 timer if we were waiting for a response and received one
 			// (handleIncomingFrame will decide if it's the correct response)
@@ -425,7 +429,7 @@ func (sf *Client) runProtocol() error {
 // handleIncomingFrame processes a parsed frame from the receive loop.
 func (sf *Client) handleIncomingFrame(frame *Frame) error {
 	// Validate Link Address if configured and non-zero size
-	if sf.option.config.LinkAddrSize > 0 {
+	if sf.option.config.LinkAddrSize > 0 && frame.Start != SingleCharAck {
 		receivedAddr := frame.GetLinkAddress()
 		expectedAddr := sf.option.config.LinkAddress
 		// Check against configured address and broadcast address (if applicable)
@@ -441,7 +445,7 @@ func (sf *Client) handleIncomingFrame(frame *Frame) error {
 
 	ctrl := frame.GetControlField()
 
-	if ctrl.DFC {
+	if ctrl.DFC && frame.Start != SingleCharAck {
 		sf.Warn("Received frame with Data Flow Control active (DFC=1).")
 		// Application layer might need to pause sending based on DFC state.
 	}
