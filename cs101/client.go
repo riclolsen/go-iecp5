@@ -411,12 +411,13 @@ func (sf *Client) runProtocol() error {
 				if err := sf.SendResetLink(); err != nil {
 					sf.Error("Failed to send initial Reset Link: %v", err)
 				}
-			} else {
-				ctrl := frame.GetControlField()
-				if !ctrl.ACD && !ctrl.PRM { // Message from Secondary Station
-					// sf.SendReqDataClass2() // Request class 2 data if ACD is not set
-				}
 			}
+			//else {
+			//	ctrl := frame.GetControlField()
+			//	if !ctrl.ACD && !ctrl.PRM { // Message from Secondary Station
+			//		// sf.SendReqDataClass2() // Request class 2 data if ACD is not set
+			//	}
+			//}
 		}
 	}
 }
@@ -480,8 +481,9 @@ func (sf *Client) handleIncomingFrame(frame *Frame) error {
 						// Keep outstanding frame? Or treat as error? For now, log warning.
 						// T1 might restart implicitly if not stopped earlier, or timeout if stopped.
 					}
-					if lastCtrl.Fun == PrimFcResetLink && !ctrl.ACD {
-						sf.SendReqDataClass2() // Send ReqDataClass2 after ResetLink ACK if ACD is not set
+					if lastCtrl.Fun == PrimFcResetLink /*&& !ctrl.ACD */ {
+						sf.SendReqDataClass2() // Send ReqDataClass2 after ResetLink ACK
+						ctrl.ACD = false       // Set ACD to false after sending ReqDataClass2
 					}
 				} else {
 					// Unsolicited ACK?
