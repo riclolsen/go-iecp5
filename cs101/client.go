@@ -456,27 +456,34 @@ func (sf *Client) handleIncomingFrame(frame *Frame) error {
 		if sf.lastSentConfFrame != nil {
 			// Check if ACK corresponds to the outstanding frame type
 			lastCtrl := sf.lastSentConfFrame.GetControlField()
-			confirmed := false
-			if lastCtrl.Fun == PrimFcResetLink {
+			switch lastCtrl.Fun {
+			case PrimFcResetLink:
 				sf.Debug("Link Reset Confirmed by ACK. Link Active.")
 				atomic.StoreUint32(&sf.linkStatus, linkStateActive)
-				confirmed = true
 				sf.fcbState = true // Initialize FCB state after ResetLink
-			} else if lastCtrl.Fun == PrimFcUserDataConf {
-				sf.Debug("Confirmed User Data ACKed (FCB=%v)", lastCtrl.FCB)
-				sf.fcbState = !lastCtrl.FCB // Toggle FCB state *now*
-				confirmed = true
-			} else if lastCtrl.Fun == PrimFcReqStatus {
+			case PrimFcResetUser:
+				sf.Debug("Reset User Process Confirmed by ACK.")
+			case PrimFcTestLink:
 				sf.Debug("Test Link Confirmed by ACK.")
-				confirmed = true
+			case PrimFcUserDataConf:
+				sf.fcbState = !lastCtrl.FCB // Toggle FCB state *now*
+				sf.Debug("Confirmed User Data ACKed (FCB=%v)", lastCtrl.FCB)
+			case PrimFcReqAccess:
+				sf.Debug("Request Access Confirmed by ACK.")
+			case PrimFcReqStatus:
+				sf.Debug("Test Link Confirmed by ACK.")
+			case PrimFcReqData1:
+				sf.Debug("Request Data Class 1 Confirmed by ACK.")
+			case PrimFcReqData2:
+				sf.Debug("Request Data Class 2 Confirmed by ACK.")
+			default:
+				sf.Warn("Received ACK for unhandled confirmed frame type: %s", lastCtrl)
 			}
-			// Add checks for other confirmed requests if needed (e.g., ReqStatus)
 
-			if confirmed {
-				sf.lastSentConfFrame = nil // Clear outstanding frame
-				sf.retryCount = 0
-				// T1 timer was already stopped before calling handleIncomingFrame
-			}
+			sf.lastSentConfFrame = nil // Clear outstanding frame
+			sf.retryCount = 0
+			// T1 timer was already stopped before calling handleIncomingFrame
+
 			if lastCtrl.Fun == PrimFcResetLink /*&& !ctrl.ACD */ {
 				sf.SendReqDataClass2() // Send ReqDataClass2 after ResetLink ACK
 				ctrl.ACD = false       // Set ACD to false after sending ReqDataClass2
@@ -501,27 +508,34 @@ func (sf *Client) handleIncomingFrame(frame *Frame) error {
 			if sf.lastSentConfFrame != nil {
 				// Check if ACK corresponds to the outstanding frame type
 				lastCtrl := sf.lastSentConfFrame.GetControlField()
-				confirmed := false
-				if lastCtrl.Fun == PrimFcResetLink {
+				switch lastCtrl.Fun {
+				case PrimFcResetLink:
 					sf.Debug("Link Reset Confirmed by ACK. Link Active.")
 					atomic.StoreUint32(&sf.linkStatus, linkStateActive)
-					confirmed = true
 					sf.fcbState = true // Initialize FCB state after ResetLink
-				} else if lastCtrl.Fun == PrimFcUserDataConf {
-					sf.Debug("Confirmed User Data ACKed (FCB=%v)", lastCtrl.FCB)
-					sf.fcbState = !lastCtrl.FCB // Toggle FCB state *now*
-					confirmed = true
-				} else if lastCtrl.Fun == PrimFcReqStatus {
+				case PrimFcResetUser:
+					sf.Debug("Reset User Process Confirmed by ACK.")
+				case PrimFcTestLink:
 					sf.Debug("Test Link Confirmed by ACK.")
-					confirmed = true
+				case PrimFcUserDataConf:
+					sf.fcbState = !lastCtrl.FCB // Toggle FCB state *now*
+					sf.Debug("Confirmed User Data ACKed (FCB=%v)", lastCtrl.FCB)
+				case PrimFcReqAccess:
+					sf.Debug("Request Access Confirmed by ACK.")
+				case PrimFcReqStatus:
+					sf.Debug("Test Link Confirmed by ACK.")
+				case PrimFcReqData1:
+					sf.Debug("Request Data Class 1 Confirmed by ACK.")
+				case PrimFcReqData2:
+					sf.Debug("Request Data Class 2 Confirmed by ACK.")
+				default:
+					sf.Warn("Received ACK for unhandled confirmed frame type: %s", lastCtrl)
 				}
-				// Add checks for other confirmed requests if needed (e.g., ReqStatus)
 
-				if confirmed {
-					sf.lastSentConfFrame = nil // Clear outstanding frame
-					sf.retryCount = 0
-					// T1 timer was already stopped before calling handleIncomingFrame
-				}
+				sf.lastSentConfFrame = nil // Clear outstanding frame
+				sf.retryCount = 0
+				// T1 timer was already stopped before calling handleIncomingFrame
+
 				if lastCtrl.Fun == PrimFcResetLink /*&& !ctrl.ACD */ {
 					sf.SendReqDataClass2() // Send ReqDataClass2 after ResetLink ACK
 					ctrl.ACD = false       // Set ACD to false after sending ReqDataClass2
