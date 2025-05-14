@@ -614,6 +614,7 @@ func (sf *Client) handleIncomingFrame(frame *Frame) error {
 			switch ctrl.Fun {
 			case SecFcUserDataConf: // Confirmed User Data from Secondary
 				sf.Debug("Received Confirmed User Data from Secondary")
+				sf.fcbState = !sf.lastSentConfFrame.GetControlField().FCB // Toggle FCB state *now*
 				if sf.lastSentConfFrame != nil {
 					sf.lastSentConfFrame = nil
 					sf.retryCount = 0
@@ -625,10 +626,9 @@ func (sf *Client) handleIncomingFrame(frame *Frame) error {
 				} else {
 					sf.Warn("Failed to decode ASDU from variable frame")
 				}
-				// Send ACK back
-				//sf.sendAck()
 			case SecFcRespStatus: // Response containing requested data (Class 1/2) or Link Status
 				sf.Debug("Received Response Status/Data from Secondary")
+				sf.fcbState = !sf.lastSentConfFrame.GetControlField().FCB // Toggle FCB state *now*
 				// If this was response to ReqData1/2, clear outstanding frame
 				if sf.lastSentConfFrame != nil &&
 					(sf.lastSentConfFrame.GetControlField().Fun == PrimFcReqData1 ||
@@ -648,6 +648,7 @@ func (sf *Client) handleIncomingFrame(frame *Frame) error {
 				}
 			case SecFcRespLinkNF: // NACK - Data Not Available (for Class 1/2 requests)
 				sf.Warn("Received Data Not Available NACK")
+				sf.fcbState = !sf.lastSentConfFrame.GetControlField().FCB // Toggle FCB state *now*
 				// If this was response to ReqData1/2, clear outstanding frame
 				if sf.lastSentConfFrame != nil &&
 					(sf.lastSentConfFrame.GetControlField().Fun == PrimFcReqData1 ||
