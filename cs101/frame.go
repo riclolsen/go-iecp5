@@ -16,6 +16,8 @@ import (
 
 // CS101 Frame Format Constants (FT1.2)
 const (
+	// SingleCharAck is the single-character acknowledgment
+	SingleCharAck byte = 0xE5
 	// StartFixed is the start character for fixed-length frames
 	StartFixed byte = 0x10
 	// StartVariable is the start character for variable-length frames
@@ -224,6 +226,11 @@ func ParseFrame(r io.Reader, linkAddrSize byte, ctx *context.Context) (*Frame, e
 	frame := &Frame{Start: startByte[0]}
 
 	switch frame.Start {
+	case SingleCharAck: // Single Character ACK
+		// This is a single-byte frame. No further data to read.
+		// The Frame struct will have only the Start field populated.
+		return frame, nil
+
 	case StartFixed: // Fixed Length Frame (e.g., ACK, NACK, Link Status)
 		// Read Control + LinkAddr (optional) + Checksum + End
 		fixedLen := 1 + int(linkAddrSize) + 1 + 1 // Control + LinkAddr + Checksum + End
@@ -290,7 +297,7 @@ func ParseFrame(r io.Reader, linkAddrSize byte, ctx *context.Context) (*Frame, e
 		}
 
 	default:
-		return nil, fmt.Errorf("%w: expected 0x10 or 0x68, got 0x%02X", ErrInvalidStartChar, frame.Start)
+		return nil, fmt.Errorf("%w: expected 0x10, 0x68, 0xE5, or 0x95, got 0x%02X", ErrInvalidStartChar, frame.Start)
 	}
 
 	return frame, nil

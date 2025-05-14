@@ -448,101 +448,134 @@ func (sf *Client) handleIncomingFrame(frame *Frame) error {
 
 	// Handle based on frame type and control field
 	switch frame.Start {
-	case StartFixed:
-		// Handle fixed-length frames (ACK, NACK, Link Status Resp)
-		if !ctrl.PRM { // Message from Secondary Station
-			switch ctrl.Fun {
-			case SecFcConfACK:
-				sf.Debug("Received ACK")
-				if sf.lastSentConfFrame != nil {
-					// Check if ACK corresponds to the outstanding frame type
-					lastCtrl := sf.lastSentConfFrame.GetControlField()
-					confirmed := false
-					if lastCtrl.Fun == PrimFcResetLink {
-						sf.Debug("Link Reset Confirmed by ACK. Link Active.")
-						atomic.StoreUint32(&sf.linkStatus, linkStateActive)
-						confirmed = true
-						sf.fcbState = true // Initialize FCB state after ResetLink
-					} else if lastCtrl.Fun == PrimFcUserDataConf {
-						sf.Debug("Confirmed User Data ACKed (FCB=%v)", lastCtrl.FCB)
-						sf.fcbState = !lastCtrl.FCB // Toggle FCB state *now*
-						confirmed = true
-					} else if lastCtrl.Fun == PrimFcReqStatus {
-						sf.Debug("Test Link Confirmed by ACK.")
-						confirmed = true
-					}
-					// Add checks for other confirmed requests if needed (e.g., ReqStatus)
+	case SingleCharAck:
+		if sf.lastSentConfFrame != nil {
+			// Check if ACK corresponds to the outstanding frame type
+			lastCtrl := sf.lastSentConfFrame.GetControlField()
+			confirmed := false
+			if lastCtrl.Fun == PrimFcResetLink {
+				sf.Debug("Link Reset Confirmed by ACK. Link Active.")
+				atomic.StoreUint32(&sf.linkStatus, linkStateActive)
+				confirmed = true
+				sf.fcbState = true // Initialize FCB state after ResetLink
+			} else if lastCtrl.Fun == PrimFcUserDataConf {
+				sf.Debug("Confirmed User Data ACKed (FCB=%v)", lastCtrl.FCB)
+				sf.fcbState = !lastCtrl.FCB // Toggle FCB state *now*
+				confirmed = true
+			} else if lastCtrl.Fun == PrimFcReqStatus {
+				sf.Debug("Test Link Confirmed by ACK.")
+				confirmed = true
+			}
+			// Add checks for other confirmed requests if needed (e.g., ReqStatus)
 
-					if confirmed {
-						sf.lastSentConfFrame = nil // Clear outstanding frame
-						sf.retryCount = 0
-						// T1 timer was already stopped before calling handleIncomingFrame
-					} else {
-						sf.Warn("Received ACK but it didn't match outstanding frame (Fun=%d)", lastCtrl.Fun)
-						// Keep outstanding frame? Or treat as error? For now, log warning.
-						// T1 might restart implicitly if not stopped earlier, or timeout if stopped.
-					}
-					if lastCtrl.Fun == PrimFcResetLink /*&& !ctrl.ACD */ {
-						sf.SendReqDataClass2() // Send ReqDataClass2 after ResetLink ACK
-						ctrl.ACD = false       // Set ACD to false after sending ReqDataClass2
-					}
-				} else {
-					// Unsolicited ACK?
-					sf.Warn("Received ACK but no confirmed frame outstanding.")
-				}
-
-			case SecFcConfNACK:
-				sf.Warn("Received NACK (Link Busy or Error)")
-				if sf.lastSentConfFrame != nil {
-					sf.Warn("NACK received for outstanding frame (Fun=%d). Retrying may occur on T1.", sf.lastSentConfFrame.GetControlField().Fun)
-					// Don't clear outstanding frame here. Let T1 handle retry/failure.
-					// Reset retry count as NACK is a valid (negative) response.
-					sf.retryCount = 0
-					// T1 timer was already stopped before calling handleIncomingFrame
-				} else {
-					sf.Warn("Received NACK but no confirmed frame outstanding.")
-				}
-			case SecFcRespStatus: // Response to Request Status or unsolicited status
-				sf.Debug("Received Link Status Response (DFC=%v)", ctrl.DFC)
-				// TODO: Process link status if needed (e.g., DFC bit indicates secondary buffer full)
-				// Application layer might need to pause sending based on DFC state.
-				// For now, just log the DFC state.
-				if ctrl.DFC {
-					sf.Warn("Secondary station indicates Data Flow Control active (buffer likely full).")
-				}
-				// If this was response to ReqStatus, clear outstanding frame
-				if sf.lastSentConfFrame != nil && sf.lastSentConfFrame.GetControlField().Fun == PrimFcReqStatus {
-					sf.Debug("Request Link Status confirmed by Response.")
-					sf.lastSentConfFrame = nil
-					sf.retryCount = 0
-					// T1 timer was already stopped before calling handleIncomingFrame
-				}
-			case SecFcRespLinkNF:
-				sf.Warn("Received NACK (Link not functioning)")
-				if sf.lastSentConfFrame != nil {
-					sf.lastSentConfFrame = nil
-					sf.retryCount = 0
-				}
-			case SecFcRespLinkNI:
-				sf.Error("Received Link Service Not Implemented")
-				if sf.lastSentConfFrame != nil {
-					sf.lastSentConfFrame = nil
-					sf.retryCount = 0
-				}
-				// TODO: Handle link failure indication (e.g., trigger reconnect or notify application)
-				// For now, log the error. The connection manager might handle reconnection.
-			case SecFcUserDataNoRep:
-				sf.Debug("NACK: requested data not available")
-				sf.fcbState = !sf.lastSentConfFrame.GetControlField().FCB // Toggle FCB state *now*
-				if sf.lastSentConfFrame != nil {
-					sf.lastSentConfFrame = nil
-					sf.retryCount = 0
-				}
-			default:
-				sf.Warn("Received unhandled fixed-length frame from secondary: %s", ctrl)
+			if confirmed {
+				sf.lastSentConfFrame = nil // Clear outstanding frame
+				sf.retryCount = 0
+				// T1 timer was already stopped before calling handleIncomingFrame
+			}
+			if lastCtrl.Fun == PrimFcResetLink /*&& !ctrl.ACD */ {
+				sf.SendReqDataClass2() // Send ReqDataClass2 after ResetLink ACK
+				ctrl.ACD = false       // Set ACD to false after sending ReqDataClass2
 			}
 		} else {
+			// Unsolicited ACK?
+			sf.Warn("Received ACK but no confirmed frame outstanding.")
+		}
+
+	case StartFixed:
+		// Handle fixed-length frames (ACK, NACK, Link Status Resp)
+
+		if ctrl.PRM { // Message from Primary Station
 			sf.Warn("Received unexpected fixed-length frame from primary: %s", ctrl)
+			return nil // Ignore unexpected frames from primary
+		}
+		sf.Debug("Received ACK")
+
+		switch ctrl.Fun {
+		case SecFcConfACK:
+
+			if sf.lastSentConfFrame != nil {
+				// Check if ACK corresponds to the outstanding frame type
+				lastCtrl := sf.lastSentConfFrame.GetControlField()
+				confirmed := false
+				if lastCtrl.Fun == PrimFcResetLink {
+					sf.Debug("Link Reset Confirmed by ACK. Link Active.")
+					atomic.StoreUint32(&sf.linkStatus, linkStateActive)
+					confirmed = true
+					sf.fcbState = true // Initialize FCB state after ResetLink
+				} else if lastCtrl.Fun == PrimFcUserDataConf {
+					sf.Debug("Confirmed User Data ACKed (FCB=%v)", lastCtrl.FCB)
+					sf.fcbState = !lastCtrl.FCB // Toggle FCB state *now*
+					confirmed = true
+				} else if lastCtrl.Fun == PrimFcReqStatus {
+					sf.Debug("Test Link Confirmed by ACK.")
+					confirmed = true
+				}
+				// Add checks for other confirmed requests if needed (e.g., ReqStatus)
+
+				if confirmed {
+					sf.lastSentConfFrame = nil // Clear outstanding frame
+					sf.retryCount = 0
+					// T1 timer was already stopped before calling handleIncomingFrame
+				}
+				if lastCtrl.Fun == PrimFcResetLink /*&& !ctrl.ACD */ {
+					sf.SendReqDataClass2() // Send ReqDataClass2 after ResetLink ACK
+					ctrl.ACD = false       // Set ACD to false after sending ReqDataClass2
+				}
+			} else {
+				// Unsolicited ACK?
+				sf.Warn("Received ACK but no confirmed frame outstanding.")
+			}
+
+		case SecFcConfNACK:
+			sf.Warn("Received NACK (Link Busy or Error)")
+			if sf.lastSentConfFrame != nil {
+				sf.Warn("NACK received for outstanding frame (Fun=%d). Retrying may occur on T1.", sf.lastSentConfFrame.GetControlField().Fun)
+				// Don't clear outstanding frame here. Let T1 handle retry/failure.
+				// Reset retry count as NACK is a valid (negative) response.
+				sf.retryCount = 0
+				// T1 timer was already stopped before calling handleIncomingFrame
+			} else {
+				sf.Warn("Received NACK but no confirmed frame outstanding.")
+			}
+		case SecFcRespStatus: // Response to Request Status or unsolicited status
+			sf.Debug("Received Link Status Response (DFC=%v)", ctrl.DFC)
+			// TODO: Process link status if needed (e.g., DFC bit indicates secondary buffer full)
+			// Application layer might need to pause sending based on DFC state.
+			// For now, just log the DFC state.
+			if ctrl.DFC {
+				sf.Warn("Secondary station indicates Data Flow Control active (buffer likely full).")
+			}
+			// If this was response to ReqStatus, clear outstanding frame
+			if sf.lastSentConfFrame != nil && sf.lastSentConfFrame.GetControlField().Fun == PrimFcReqStatus {
+				sf.Debug("Request Link Status confirmed by Response.")
+				sf.lastSentConfFrame = nil
+				sf.retryCount = 0
+				// T1 timer was already stopped before calling handleIncomingFrame
+			}
+		case SecFcRespLinkNF:
+			sf.Warn("Received NACK (Link not functioning)")
+			if sf.lastSentConfFrame != nil {
+				sf.lastSentConfFrame = nil
+				sf.retryCount = 0
+			}
+		case SecFcRespLinkNI:
+			sf.Error("Received Link Service Not Implemented")
+			if sf.lastSentConfFrame != nil {
+				sf.lastSentConfFrame = nil
+				sf.retryCount = 0
+			}
+			// TODO: Handle link failure indication (e.g., trigger reconnect or notify application)
+			// For now, log the error. The connection manager might handle reconnection.
+		case SecFcUserDataNoRep:
+			sf.Debug("NACK: requested data not available")
+			sf.fcbState = !sf.lastSentConfFrame.GetControlField().FCB // Toggle FCB state *now*
+			if sf.lastSentConfFrame != nil {
+				sf.lastSentConfFrame = nil
+				sf.retryCount = 0
+			}
+		default:
+			sf.Warn("Received unhandled fixed-length frame from secondary: %s", ctrl)
 		}
 
 	case StartVariable:
