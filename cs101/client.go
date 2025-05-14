@@ -463,18 +463,24 @@ func (sf *Client) handleIncomingFrame(frame *Frame) error {
 				sf.fcbState = true // Initialize FCB state after ResetLink
 			case PrimFcResetUser:
 				sf.Debug("Reset User Process Confirmed by ACK.")
+				sf.fcbState = !lastCtrl.FCB // Toggle FCB state *now*
 			case PrimFcTestLink:
+				sf.fcbState = !lastCtrl.FCB // Toggle FCB state *now*
 				sf.Debug("Test Link Confirmed by ACK.")
 			case PrimFcUserDataConf:
 				sf.fcbState = !lastCtrl.FCB // Toggle FCB state *now*
 				sf.Debug("Confirmed User Data ACKed (FCB=%v)", lastCtrl.FCB)
 			case PrimFcReqAccess:
+				sf.fcbState = !lastCtrl.FCB // Toggle FCB state *now*
 				sf.Debug("Request Access Confirmed by ACK.")
 			case PrimFcReqStatus:
+				sf.fcbState = !lastCtrl.FCB // Toggle FCB state *now*
 				sf.Debug("Test Link Confirmed by ACK.")
 			case PrimFcReqData1:
+				sf.fcbState = !lastCtrl.FCB // Toggle FCB state *now*
 				sf.Debug("Request Data Class 1 Confirmed by ACK.")
 			case PrimFcReqData2:
+				sf.fcbState = !lastCtrl.FCB // Toggle FCB state *now*
 				sf.Debug("Request Data Class 2 Confirmed by ACK.")
 			default:
 				sf.Warn("Received ACK for unhandled confirmed frame type: %s", lastCtrl)
@@ -515,18 +521,24 @@ func (sf *Client) handleIncomingFrame(frame *Frame) error {
 					sf.fcbState = true // Initialize FCB state after ResetLink
 				case PrimFcResetUser:
 					sf.Debug("Reset User Process Confirmed by ACK.")
+					sf.fcbState = !lastCtrl.FCB // Toggle FCB state *now*
 				case PrimFcTestLink:
+					sf.fcbState = !lastCtrl.FCB // Toggle FCB state *now*
 					sf.Debug("Test Link Confirmed by ACK.")
 				case PrimFcUserDataConf:
 					sf.fcbState = !lastCtrl.FCB // Toggle FCB state *now*
 					sf.Debug("Confirmed User Data ACKed (FCB=%v)", lastCtrl.FCB)
 				case PrimFcReqAccess:
+					sf.fcbState = !lastCtrl.FCB // Toggle FCB state *now*
 					sf.Debug("Request Access Confirmed by ACK.")
 				case PrimFcReqStatus:
+					sf.fcbState = !lastCtrl.FCB // Toggle FCB state *now*
 					sf.Debug("Test Link Confirmed by ACK.")
 				case PrimFcReqData1:
+					sf.fcbState = !lastCtrl.FCB // Toggle FCB state *now*
 					sf.Debug("Request Data Class 1 Confirmed by ACK.")
 				case PrimFcReqData2:
+					sf.fcbState = !lastCtrl.FCB // Toggle FCB state *now*
 					sf.Debug("Request Data Class 2 Confirmed by ACK.")
 				default:
 					sf.Warn("Received ACK for unhandled confirmed frame type: %s", lastCtrl)
