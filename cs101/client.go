@@ -462,6 +462,7 @@ func (sf *Client) handleIncomingFrame(frame *Frame) error {
 						sf.Debug("Link Reset Confirmed by ACK. Link Active.")
 						atomic.StoreUint32(&sf.linkStatus, linkStateActive)
 						confirmed = true
+						sf.fcbState = true // Initialize FCB state after ResetLink
 					} else if lastCtrl.Fun == PrimFcUserDataConf {
 						sf.Debug("Confirmed User Data ACKed (FCB=%v)", lastCtrl.FCB)
 						sf.fcbState = !lastCtrl.FCB // Toggle FCB state *now*
