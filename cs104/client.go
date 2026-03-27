@@ -66,7 +66,8 @@ type Client struct {
 	onConnect        func(c *Client)
 	onConnectionLost func(c *Client)
 	onConnectTimeout func(c *Client)
-	onServerActive   func(c *Client)
+	onActivated      func(c *Client)
+	onDeactivated    func(c *Client)
 }
 
 // NewClient returns an IEC104 master,default config and default asdu.ParamsWide params
@@ -82,7 +83,8 @@ func NewClient(handler ClientHandlerInterface, o *ClientOption) *Client {
 		onConnect:        func(*Client) {},
 		onConnectionLost: func(*Client) {},
 		onConnectTimeout: func(*Client) {},
-		onServerActive:   func(*Client) {},
+		onActivated:      func(*Client) {},
+		onDeactivated:    func(*Client) {},
 	}
 }
 
@@ -110,10 +112,18 @@ func (sf *Client) SetConnectTimeoutHandler(f func(c *Client)) *Client {
 	return sf
 }
 
-// SetServerActiveHandler set server active handler
-func (sf *Client) SetServerActiveHandler(f func(c *Client)) *Client {
+// SetOnActivatedHandler sets a handler invoked when StartDT is confirmed by the server
+func (sf *Client) SetOnActivatedHandler(f func(c *Client)) *Client {
 	if f != nil {
-		sf.onServerActive = f
+		sf.onActivated = f
+	}
+	return sf
+}
+
+// SetOnDeactivatedHandler sets a handler invoked when StopDT is confirmed by the server
+func (sf *Client) SetOnDeactivatedHandler(f func(c *Client)) *Client {
+	if f != nil {
+		sf.onDeactivated = f
 	}
 	return sf
 }
@@ -411,13 +421,14 @@ func (sf *Client) run(ctx context.Context) {
 				case uStartDtConfirm:
 					atomic.StoreUint32(&sf.isActive, active)
 					sf.startDtActiveSendSince.Store(willNotTimeout)
-					go sf.onServerActive(sf)
+					sf.onActivated(sf)
 				//case uStopDtActive:
 				//	sf.sendUFrame(uStopDtConfirm)
 				//	atomic.StoreUint32(&sf.isActive, inactive)
 				case uStopDtConfirm:
 					atomic.StoreUint32(&sf.isActive, inactive)
 					sf.stopDtActiveSendSince.Store(willNotTimeout)
+					sf.onDeactivated(sf)
 				case uTestFrActive:
 					sf.sendUFrame(uTestFrConfirm)
 				case uTestFrConfirm:
@@ -516,6 +527,11 @@ func (sf *Client) updateAckNoOut(ackNo uint16) (ok bool) {
 // IsConnected get server session connected state
 func (sf *Client) IsConnected() bool {
 	return sf.connectStatus() == connected
+}
+
+// IsActive returns whether the data transfer is active (StartDT confirmed)
+func (sf *Client) IsActive() bool {
+	return atomic.LoadUint32(&sf.isActive) == active
 }
 
 // clientHandler hand response handler

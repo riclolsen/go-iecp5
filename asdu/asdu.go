@@ -6,9 +6,11 @@
 package asdu
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"math/bits"
+	"strings"
 	"time"
 )
 
@@ -180,6 +182,321 @@ func (sf *ASDU) SendReplyMirror(c Connect, cause Cause) error {
 	return c.Send(r)
 }
 
+// String returns a human-readable description of the ASDU without dumping raw byte arrays.
+func (sf *ASDU) String() string {
+	if sf == nil {
+		return "<nil>"
+	}
+	var b strings.Builder
+	// Header: Type, VSQ, Cause, Addresses
+	b.WriteString(sf.Identifier.String())
+	b.WriteByte(' ')
+	b.WriteString("VSQ<" + sf.Variable.String() + ">")
+	_, _ = fmt.Fprintf(&b, " IOA-Width=%d", sf.InfoObjAddrSize)
+
+	// If there's no information object payload, return header
+	if len(sf.InfoObj) == 0 {
+		return b.String()
+	}
+
+	// Work on a non-destructive copy of the infoObj by saving and restoring slice
+	saved := sf.InfoObj
+	defer func() { sf.InfoObj = saved }()
+
+	switch sf.Type {
+	// Monitored information (common)
+	case M_SP_NA_1, M_SP_TA_1, M_SP_TB_1:
+		infos := sf.GetSinglePoint()
+		_, _ = fmt.Fprintf(&b, " items=%d", len(infos))
+		for i, it := range infos {
+			if i == 0 {
+				b.WriteString(" [")
+			} else {
+				b.WriteString(", ")
+			}
+			_, _ = fmt.Fprintf(&b, "%d=%t", it.Ioa, it.Value)
+			if it.Qds != QDSGood {
+				_, _ = fmt.Fprintf(&b, " QDS=0x%02x", byte(it.Qds))
+			}
+			if !it.Time.IsZero() {
+				_, _ = fmt.Fprintf(&b, " @%s", it.Time.Format(time.RFC3339Nano))
+			}
+		}
+		if len(infos) > 0 {
+			b.WriteByte(']')
+		}
+	case M_DP_NA_1, M_DP_TA_1, M_DP_TB_1:
+		infos := sf.GetDoublePoint()
+		_, _ = fmt.Fprintf(&b, " items=%d", len(infos))
+		for i, it := range infos {
+			if i == 0 {
+				b.WriteString(" [")
+			} else {
+				b.WriteString(", ")
+			}
+			_, _ = fmt.Fprintf(&b, "%d=%d", it.Ioa, it.Value)
+			if it.Qds != QDSGood {
+				_, _ = fmt.Fprintf(&b, " QDS=0x%02x", byte(it.Qds))
+			}
+			if !it.Time.IsZero() {
+				_, _ = fmt.Fprintf(&b, " @%s", it.Time.Format(time.RFC3339Nano))
+			}
+		}
+		if len(infos) > 0 {
+			b.WriteByte(']')
+		}
+	case M_ST_NA_1, M_ST_TA_1, M_ST_TB_1:
+		infos := sf.GetStepPosition()
+		_, _ = fmt.Fprintf(&b, " items=%d", len(infos))
+		for i, it := range infos {
+			if i == 0 {
+				b.WriteString(" [")
+			} else {
+				b.WriteString(", ")
+			}
+			_, _ = fmt.Fprintf(&b, "%d=val(%d)", it.Ioa, it.Value.Val)
+			if it.Value.HasTransient {
+				b.WriteString(" transient")
+			}
+			if it.Qds != QDSGood {
+				_, _ = fmt.Fprintf(&b, " QDS=0x%02x", byte(it.Qds))
+			}
+			if !it.Time.IsZero() {
+				_, _ = fmt.Fprintf(&b, " @%s", it.Time.Format(time.RFC3339Nano))
+			}
+		}
+		if len(infos) > 0 {
+			b.WriteByte(']')
+		}
+	case M_BO_NA_1, M_BO_TA_1, M_BO_TB_1:
+		infos := sf.GetBitString32()
+		_, _ = fmt.Fprintf(&b, " items=%d", len(infos))
+		for i, it := range infos {
+			if i == 0 {
+				b.WriteString(" [")
+			} else {
+				b.WriteString(", ")
+			}
+			_, _ = fmt.Fprintf(&b, "%d=0x%08x", it.Ioa, it.Value)
+			if it.Qds != QDSGood {
+				_, _ = fmt.Fprintf(&b, " QDS=0x%02x", byte(it.Qds))
+			}
+			if !it.Time.IsZero() {
+				_, _ = fmt.Fprintf(&b, " @%s", it.Time.Format(time.RFC3339Nano))
+			}
+		}
+		if len(infos) > 0 {
+			b.WriteByte(']')
+		}
+	case M_ME_NA_1, M_ME_TA_1, M_ME_TD_1, M_ME_ND_1:
+		infos := sf.GetMeasuredValueNormal()
+		_, _ = fmt.Fprintf(&b, " items=%d", len(infos))
+		for i, it := range infos {
+			if i == 0 {
+				b.WriteString(" [")
+			} else {
+				b.WriteString(", ")
+			}
+			_, _ = fmt.Fprintf(&b, "%d=%.6f", it.Ioa, it.Value.Float64())
+			if it.Qds != QDSGood {
+				_, _ = fmt.Fprintf(&b, " QDS=0x%02x", byte(it.Qds))
+			}
+			if !it.Time.IsZero() {
+				_, _ = fmt.Fprintf(&b, " @%s", it.Time.Format(time.RFC3339Nano))
+			}
+		}
+		if len(infos) > 0 {
+			b.WriteByte(']')
+		}
+	case M_ME_NB_1, M_ME_TB_1, M_ME_TE_1:
+		infos := sf.GetMeasuredValueScaled()
+		_, _ = fmt.Fprintf(&b, " items=%d", len(infos))
+		for i, it := range infos {
+			if i == 0 {
+				b.WriteString(" [")
+			} else {
+				b.WriteString(", ")
+			}
+			_, _ = fmt.Fprintf(&b, "%d=%d", it.Ioa, it.Value)
+			if it.Qds != QDSGood {
+				_, _ = fmt.Fprintf(&b, " QDS=0x%02x", byte(it.Qds))
+			}
+			if !it.Time.IsZero() {
+				_, _ = fmt.Fprintf(&b, " @%s", it.Time.Format(time.RFC3339Nano))
+			}
+		}
+		if len(infos) > 0 {
+			b.WriteByte(']')
+		}
+	case M_ME_NC_1, M_ME_TC_1, M_ME_TF_1:
+		infos := sf.GetMeasuredValueFloat()
+		_, _ = fmt.Fprintf(&b, " items=%d", len(infos))
+		for i, it := range infos {
+			if i == 0 {
+				b.WriteString(" [")
+			} else {
+				b.WriteString(", ")
+			}
+			_, _ = fmt.Fprintf(&b, "%d=%g", it.Ioa, it.Value)
+			if it.Qds != QDSGood {
+				_, _ = fmt.Fprintf(&b, " QDS=0x%02x", byte(it.Qds))
+			}
+			if !it.Time.IsZero() {
+				_, _ = fmt.Fprintf(&b, " @%s", it.Time.Format(time.RFC3339Nano))
+			}
+		}
+		if len(infos) > 0 {
+			b.WriteByte(']')
+		}
+	case M_IT_NA_1, M_IT_TA_1, M_IT_TB_1:
+		infos := sf.GetIntegratedTotals()
+		_, _ = fmt.Fprintf(&b, " items=%d", len(infos))
+		for i, it := range infos {
+			if i == 0 {
+				b.WriteString(" [")
+			} else {
+				b.WriteString(", ")
+			}
+			v := it.Value
+			_, _ = fmt.Fprintf(&b, "%d=count(%d) seq=%d", it.Ioa, v.CounterReading, v.SeqNumber)
+			if v.HasCarry {
+				b.WriteString(" carry")
+			}
+			if v.IsAdjusted {
+				b.WriteString(" adjusted")
+			}
+			if v.IsInvalid {
+				b.WriteString(" invalid")
+			}
+			if !it.Time.IsZero() {
+				_, _ = fmt.Fprintf(&b, " @%s", it.Time.Format(time.RFC3339Nano))
+			}
+		}
+		if len(infos) > 0 {
+			b.WriteByte(']')
+		}
+	case M_EP_TA_1, M_EP_TD_1:
+		infos := sf.GetEventOfProtectionEquipment()
+		_, _ = fmt.Fprintf(&b, " items=%d", len(infos))
+		for i, it := range infos {
+			if i == 0 {
+				b.WriteString(" [")
+			} else {
+				b.WriteString(", ")
+			}
+			_, _ = fmt.Fprintf(&b, "%d=event(%d) QDP=0x%02x msec=%d", it.Ioa, it.Event, byte(it.Qdp), it.Msec)
+			if !it.Time.IsZero() {
+				_, _ = fmt.Fprintf(&b, " @%s", it.Time.Format(time.RFC3339Nano))
+			}
+		}
+		if len(infos) > 0 {
+			b.WriteByte(']')
+		}
+	case M_EP_TB_1, M_EP_TE_1:
+		it := sf.GetPackedStartEventsOfProtectionEquipment()
+		_, _ = fmt.Fprintf(&b, " IOA=%d start=0x%02x QDP=0x%02x msec=%d", it.Ioa, byte(it.Event), byte(it.Qdp), it.Msec)
+		if !it.Time.IsZero() {
+			_, _ = fmt.Fprintf(&b, " @%s", it.Time.Format(time.RFC3339Nano))
+		}
+	case M_EP_TC_1, M_EP_TF_1:
+		it := sf.GetPackedOutputCircuitInfo()
+		_, _ = fmt.Fprintf(&b, " IOA=%d oci=0x%02x QDP=0x%02x msec=%d", it.Ioa, byte(it.Oci), byte(it.Qdp), it.Msec)
+		if !it.Time.IsZero() {
+			_, _ = fmt.Fprintf(&b, " @%s", it.Time.Format(time.RFC3339Nano))
+		}
+	case M_PS_NA_1:
+		infos := sf.GetPackedSinglePointWithSCD()
+		_, _ = fmt.Fprintf(&b, " items=%d", len(infos))
+		for i, it := range infos {
+			if i == 0 {
+				b.WriteString(" [")
+			} else {
+				b.WriteString(", ")
+			}
+			_, _ = fmt.Fprintf(&b, "%d=SCD(0x%08x) QDS=0x%02x", it.Ioa, uint32(it.Scd), byte(it.Qds))
+		}
+		if len(infos) > 0 {
+			b.WriteByte(']')
+		}
+
+	// System and control directions
+	case M_EI_NA_1:
+		ioa, coi := sf.GetEndOfInitialization()
+		_, _ = fmt.Fprintf(&b, " IOA=%d cause=%d localChange=%t", ioa, coi.Cause, coi.IsLocalChange)
+	case C_SC_NA_1, C_SC_TA_1:
+		cmd := sf.GetSingleCmd()
+		_, _ = fmt.Fprintf(&b, " IOA=%d val=%t QOC=0x%02x", cmd.Ioa, cmd.Value, cmd.Qoc.Value())
+		if !cmd.Time.IsZero() {
+			_, _ = fmt.Fprintf(&b, " @%s", cmd.Time.Format(time.RFC3339Nano))
+		}
+	case C_DC_NA_1, C_DC_TA_1:
+		cmd := sf.GetDoubleCmd()
+		_, _ = fmt.Fprintf(&b, " IOA=%d val=%d QOC=0x%02x", cmd.Ioa, cmd.Value, cmd.Qoc.Value())
+		if !cmd.Time.IsZero() {
+			_, _ = fmt.Fprintf(&b, " @%s", cmd.Time.Format(time.RFC3339Nano))
+		}
+	case C_RC_NA_1, C_RC_TA_1:
+		cmd := sf.GetStepCmd()
+		_, _ = fmt.Fprintf(&b, " IOA=%d val=%d QOC=0x%02x", cmd.Ioa, cmd.Value, cmd.Qoc.Value())
+		if !cmd.Time.IsZero() {
+			_, _ = fmt.Fprintf(&b, " @%s", cmd.Time.Format(time.RFC3339Nano))
+		}
+	case C_SE_NA_1, C_SE_TA_1:
+		cmd := sf.GetSetpointNormalCmd()
+		_, _ = fmt.Fprintf(&b, " IOA=%d val=%.6f QOS=0x%02x", cmd.Ioa, cmd.Value.Float64(), byte(cmd.Qos.Value()))
+		if !cmd.Time.IsZero() {
+			_, _ = fmt.Fprintf(&b, " @%s", cmd.Time.Format(time.RFC3339Nano))
+		}
+	case C_SE_NB_1, C_SE_TB_1:
+		cmd := sf.GetSetpointCmdScaled()
+		_, _ = fmt.Fprintf(&b, " IOA=%d val=%d QOS=0x%02x", cmd.Ioa, cmd.Value, byte(cmd.Qos.Value()))
+		if !cmd.Time.IsZero() {
+			_, _ = fmt.Fprintf(&b, " @%s", cmd.Time.Format(time.RFC3339Nano))
+		}
+	case C_SE_NC_1, C_SE_TC_1:
+		cmd := sf.GetSetpointFloatCmd()
+		_, _ = fmt.Fprintf(&b, " IOA=%d val=%g QOS=0x%02x", cmd.Ioa, cmd.Value, byte(cmd.Qos.Value()))
+		if !cmd.Time.IsZero() {
+			_, _ = fmt.Fprintf(&b, " @%s", cmd.Time.Format(time.RFC3339Nano))
+		}
+	case C_BO_NA_1, C_BO_TA_1:
+		cmd := sf.GetBitsString32Cmd()
+		_, _ = fmt.Fprintf(&b, " IOA=%d bits=0x%08x", cmd.Ioa, cmd.Value)
+		if !cmd.Time.IsZero() {
+			_, _ = fmt.Fprintf(&b, " @%s", cmd.Time.Format(time.RFC3339Nano))
+		}
+
+	// Parameters
+	case P_ME_NA_1:
+		p := sf.GetParameterNormal()
+		_, _ = fmt.Fprintf(&b, " IOA=%d val=%.6f QPM=0x%02x", p.Ioa, p.Value.Float64(), byte(p.Qpm.Value()))
+	case P_ME_NB_1:
+		p := sf.GetParameterScaled()
+		_, _ = fmt.Fprintf(&b, " IOA=%d val=%d QPM=0x%02x", p.Ioa, p.Value, byte(p.Qpm.Value()))
+	case P_ME_NC_1:
+		p := sf.GetParameterFloat()
+		_, _ = fmt.Fprintf(&b, " IOA=%d val=%g QPM=0x%02x", p.Ioa, p.Value, byte(p.Qpm.Value()))
+	case P_AC_NA_1:
+		p := sf.GetParameterActivation()
+		_, _ = fmt.Fprintf(&b, " IOA=%d QPA=%d", p.Ioa, p.Qpa)
+
+	// System command: Interrogation Command
+	case C_IC_NA_1:
+		ioa, qoi := sf.GetInterrogationCmd()
+		_, _ = fmt.Fprintf(&b, " IOA=%d QOI=%d", ioa, byte(qoi))
+
+	default:
+		// Unknown or not yet formatted types: provide concise summary without dumping raw bytes
+		n := int(sf.Variable.Number)
+		if n == 0 {
+			n = 1
+		}
+		_, _ = fmt.Fprintf(&b, " items=%d payload=%dB", n, len(sf.InfoObj))
+	}
+
+	return b.String()
+}
+
 //// String returns a full description.
 //func (u *ASDU) String() string {
 //	dataSize, err := GetInfoObjSize(u.Type)
@@ -335,4 +652,363 @@ func (sf *ASDU) FixInfoObjSize() error {
 	}
 
 	return nil
+}
+
+// MarshalJSON encodes ASDU into a JSON object with a dynamic "value" field.
+/*
+TypeScript types for the JSON produced by ASDU.MarshalJSON()
+
+// Base header shared by all ASDUs
+interface ASDUBase {
+  type: TypeString;        // discriminant (TypeID string)
+  variable: string;        // e.g. "sq,3" or "5"
+  cause: string;           // e.g. "Spontaneous[,neg][,test]"
+  origAddr: number;        // 0..255
+  commonAddr: number;      // 1..65535 (65535=broadcast)
+}
+
+type TypeString =
+  | "M_SP_NA_1" | "M_SP_TA_1" | "M_SP_TB_1"
+  | "M_DP_NA_1" | "M_DP_TA_1" | "M_DP_TB_1"
+  | "M_ST_NA_1" | "M_ST_TA_1" | "M_ST_TB_1"
+  | "M_BO_NA_1" | "M_BO_TA_1" | "M_BO_TB_1"
+  | "M_ME_NA_1" | "M_ME_TA_1" | "M_ME_TD_1" | "M_ME_ND_1"
+  | "M_ME_NB_1" | "M_ME_TB_1" | "M_ME_TE_1"
+  | "M_ME_NC_1" | "M_ME_TC_1" | "M_ME_TF_1"
+  | "M_IT_NA_1" | "M_IT_TA_1" | "M_IT_TB_1"
+  | "M_EP_TA_1" | "M_EP_TD_1"
+  | "M_EP_TB_1" | "M_EP_TE_1"
+  | "M_EP_TC_1" | "M_EP_TF_1"
+  | "M_PS_NA_1"
+  | "M_EI_NA_1"
+  | "C_SC_NA_1" | "C_SC_TA_1"
+  | "C_DC_NA_1" | "C_DC_TA_1"
+  | "C_RC_NA_1" | "C_RC_TA_1"
+  | "C_SE_NA_1" | "C_SE_TA_1"
+  | "C_SE_NB_1" | "C_SE_TB_1"
+  | "C_SE_NC_1" | "C_SE_TC_1"
+  | "C_BO_NA_1" | "C_BO_TA_1"
+  | "C_IC_NA_1"
+  | string; // fallback for private/unknown types
+
+// Helpers
+interface Timed { time?: string } // RFC3339Nano; may be absent if not applicable
+
+// Monitored info (arrays)
+type M_SP = ASDUBase & {
+  type: "M_SP_NA_1" | "M_SP_TA_1" | "M_SP_TB_1";
+  value: Array<{ ioa: number; value: boolean; qds: number; } & Timed>;
+};
+
+type M_DP = ASDUBase & {
+  type: "M_DP_NA_1" | "M_DP_TA_1" | "M_DP_TB_1";
+  value: Array<{ ioa: number; value: number; qds: number; } & Timed>; // value in [0..3]
+};
+
+type M_ST = ASDUBase & {
+  type: "M_ST_NA_1" | "M_ST_TA_1" | "M_ST_TB_1";
+  value: Array<{ ioa: number; value: { val: number; transient: boolean }; qds: number; } & Timed>;
+};
+
+type M_BO = ASDUBase & {
+  type: "M_BO_NA_1" | "M_BO_TA_1" | "M_BO_TB_1";
+  value: Array<{ ioa: number; value: number; qds: number; } & Timed>;
+};
+
+type M_ME_Normal_WithQ = ASDUBase & {
+  type: "M_ME_NA_1" | "M_ME_TA_1" | "M_ME_TD_1";
+  value: Array<{ ioa: number; value: number; qds: number; } & Timed>;
+};
+
+type M_ME_Normal_NoQ = ASDUBase & {
+  type: "M_ME_ND_1";
+  value: Array<{ ioa: number; value: number; } & Timed>; // no qds
+};
+
+type M_ME_Scaled = ASDUBase & {
+  type: "M_ME_NB_1" | "M_ME_TB_1" | "M_ME_TE_1";
+  value: Array<{ ioa: number; value: number; qds: number; } & Timed>;
+};
+
+type M_ME_Float = ASDUBase & {
+  type: "M_ME_NC_1" | "M_ME_TC_1" | "M_ME_TF_1";
+  value: Array<{ ioa: number; value: number; qds: number; } & Timed>;
+};
+
+type M_IT = ASDUBase & {
+  type: "M_IT_NA_1" | "M_IT_TA_1" | "M_IT_TB_1";
+  value: Array<{ ioa: number; value: { count: number; seq: number; carry: boolean; adjusted: boolean; invalid: boolean }; } & Timed>;
+};
+
+type M_EP_List = ASDUBase & {
+  type: "M_EP_TA_1" | "M_EP_TD_1";
+  value: Array<{ ioa: number; event: number; qdp: number; msec: number; } & Timed>;
+};
+
+type M_EP_Start = ASDUBase & {
+  type: "M_EP_TB_1" | "M_EP_TE_1";
+  value: { ioa: number; event: number; qdp: number; msec: number; } & Timed;
+};
+
+type M_EP_Oci = ASDUBase & {
+  type: "M_EP_TC_1" | "M_EP_TF_1";
+  value: { ioa: number; oci: number; qdp: number; msec: number; } & Timed;
+};
+
+type M_PS = ASDUBase & {
+  type: "M_PS_NA_1";
+  value: Array<{ ioa: number; scd: number; qds: number }>;
+};
+
+type M_EI = ASDUBase & {
+  type: "M_EI_NA_1";
+  value: { ioa: number; cause: number; localChange: boolean };
+};
+
+// Control direction (single object)
+type C_SC = ASDUBase & {
+  type: "C_SC_NA_1" | "C_SC_TA_1";
+  value: { ioa: number; value: boolean; qoc: number } & Timed;
+};
+
+type C_DC = ASDUBase & {
+  type: "C_DC_NA_1" | "C_DC_TA_1";
+  value: { ioa: number; value: number; qoc: number } & Timed;
+};
+
+type C_RC = ASDUBase & {
+  type: "C_RC_NA_1" | "C_RC_TA_1";
+  value: { ioa: number; value: number; qoc: number } & Timed;
+};
+
+type C_SE_Normal = ASDUBase & {
+  type: "C_SE_NA_1" | "C_SE_TA_1";
+  value: { ioa: number; value: number; qos: number } & Timed;
+};
+
+type C_SE_Scaled = ASDUBase & {
+  type: "C_SE_NB_1" | "C_SE_TB_1";
+  value: { ioa: number; value: number; qos: number } & Timed;
+};
+
+type C_SE_Float = ASDUBase & {
+  type: "C_SE_NC_1" | "C_SE_TC_1";
+  value: { ioa: number; value: number; qos: number } & Timed;
+};
+
+type C_BO = ASDUBase & {
+  type: "C_BO_NA_1" | "C_BO_TA_1";
+  value: { ioa: number; value: number } & Timed;
+};
+
+type C_IC = ASDUBase & {
+  type: "C_IC_NA_1";
+  value: { ioa: number; qoi: number };
+};
+
+// Fallback for unknown/private types
+interface ASDUUnknown extends ASDUBase {
+  value:
+    | { items: number; payload: number } // default fallback used by marshaller for unknown types
+    | any; // in case of future extensions
+}
+
+// Discriminated union for all known shapes
+export type ASDUJson =
+  | M_SP
+  | M_DP
+  | M_ST
+  | M_BO
+  | M_ME_Normal_WithQ
+  | M_ME_Normal_NoQ
+  | M_ME_Scaled
+  | M_ME_Float
+  | M_IT
+  | M_EP_List
+  | M_EP_Start
+  | M_EP_Oci
+  | M_PS
+  | M_EI
+  | C_SC
+  | C_DC
+  | C_RC
+  | C_SE_Normal
+  | C_SE_Scaled
+  | C_SE_Float
+  | C_BO
+  | C_IC
+  | ASDUUnknown;
+*/
+func (sf *ASDU) MarshalJSON() ([]byte, error) {
+	if sf == nil {
+		return []byte("null"), nil
+	}
+	// Helper for time formatting
+	ts := func(t time.Time) string {
+		if t.IsZero() {
+			return ""
+		}
+		return t.Format(time.RFC3339Nano)
+	}
+	// Build dynamic value based on Type
+	var value interface{}
+	switch sf.Type {
+	case M_SP_NA_1, M_SP_TA_1, M_SP_TB_1:
+		arr := []map[string]interface{}{}
+		for _, it := range sf.GetSinglePoint() {
+			m := map[string]interface{}{"ioa": uint(it.Ioa), "value": it.Value, "qds": byte(it.Qds)}
+			if !it.Time.IsZero() {
+				m["time"] = ts(it.Time)
+			}
+			arr = append(arr, m)
+		}
+		value = arr
+	case M_DP_NA_1, M_DP_TA_1, M_DP_TB_1:
+		arr := []map[string]interface{}{}
+		for _, it := range sf.GetDoublePoint() {
+			m := map[string]interface{}{"ioa": uint(it.Ioa), "value": byte(it.Value), "qds": byte(it.Qds)}
+			if !it.Time.IsZero() {
+				m["time"] = ts(it.Time)
+			}
+			arr = append(arr, m)
+		}
+		value = arr
+	case M_ST_NA_1, M_ST_TA_1, M_ST_TB_1:
+		arr := []map[string]interface{}{}
+		for _, it := range sf.GetStepPosition() {
+			m := map[string]interface{}{"ioa": uint(it.Ioa), "value": map[string]interface{}{"val": it.Value.Val, "transient": it.Value.HasTransient}, "qds": byte(it.Qds)}
+			if !it.Time.IsZero() {
+				m["time"] = ts(it.Time)
+			}
+			arr = append(arr, m)
+		}
+		value = arr
+	case M_BO_NA_1, M_BO_TA_1, M_BO_TB_1:
+		arr := []map[string]interface{}{}
+		for _, it := range sf.GetBitString32() {
+			m := map[string]interface{}{"ioa": uint(it.Ioa), "value": it.Value, "qds": byte(it.Qds)}
+			if !it.Time.IsZero() {
+				m["time"] = ts(it.Time)
+			}
+			arr = append(arr, m)
+		}
+		value = arr
+	case M_ME_NA_1, M_ME_TA_1, M_ME_TD_1, M_ME_ND_1:
+		arr := []map[string]interface{}{}
+		for _, it := range sf.GetMeasuredValueNormal() {
+			m := map[string]interface{}{"ioa": uint(it.Ioa), "value": it.Value.Float64()}
+			if sf.Type != M_ME_ND_1 {
+				m["qds"] = byte(it.Qds)
+			}
+			if !it.Time.IsZero() {
+				m["time"] = ts(it.Time)
+			}
+			arr = append(arr, m)
+		}
+		value = arr
+	case M_ME_NB_1, M_ME_TB_1, M_ME_TE_1:
+		arr := []map[string]interface{}{}
+		for _, it := range sf.GetMeasuredValueScaled() {
+			m := map[string]interface{}{"ioa": uint(it.Ioa), "value": it.Value, "qds": byte(it.Qds)}
+			if !it.Time.IsZero() {
+				m["time"] = ts(it.Time)
+			}
+			arr = append(arr, m)
+		}
+		value = arr
+	case M_ME_NC_1, M_ME_TC_1, M_ME_TF_1:
+		arr := []map[string]interface{}{}
+		for _, it := range sf.GetMeasuredValueFloat() {
+			m := map[string]interface{}{"ioa": uint(it.Ioa), "value": it.Value, "qds": byte(it.Qds)}
+			if !it.Time.IsZero() {
+				m["time"] = ts(it.Time)
+			}
+			arr = append(arr, m)
+		}
+		value = arr
+	case M_IT_NA_1, M_IT_TA_1, M_IT_TB_1:
+		arr := []map[string]interface{}{}
+		for _, it := range sf.GetIntegratedTotals() {
+			v := it.Value
+			m := map[string]interface{}{
+				"ioa": uint(it.Ioa),
+				"value": map[string]interface{}{
+					"count":    v.CounterReading,
+					"seq":      v.SeqNumber,
+					"carry":    v.HasCarry,
+					"adjusted": v.IsAdjusted,
+					"invalid":  v.IsInvalid,
+				},
+			}
+			if !it.Time.IsZero() {
+				m["time"] = ts(it.Time)
+			}
+			arr = append(arr, m)
+		}
+		value = arr
+	case M_EP_TA_1, M_EP_TD_1:
+		arr := []map[string]interface{}{}
+		for _, it := range sf.GetEventOfProtectionEquipment() {
+			m := map[string]interface{}{"ioa": uint(it.Ioa), "event": byte(it.Event), "qdp": byte(it.Qdp), "msec": it.Msec}
+			if !it.Time.IsZero() {
+				m["time"] = ts(it.Time)
+			}
+			arr = append(arr, m)
+		}
+		value = arr
+	case M_EP_TB_1, M_EP_TE_1:
+		it := sf.GetPackedStartEventsOfProtectionEquipment()
+		value = map[string]interface{}{"ioa": uint(it.Ioa), "event": byte(it.Event), "qdp": byte(it.Qdp), "msec": it.Msec, "time": ts(it.Time)}
+	case M_EP_TC_1, M_EP_TF_1:
+		it := sf.GetPackedOutputCircuitInfo()
+		value = map[string]interface{}{"ioa": uint(it.Ioa), "oci": byte(it.Oci), "qdp": byte(it.Qdp), "msec": it.Msec, "time": ts(it.Time)}
+	case M_PS_NA_1:
+		arr := []map[string]interface{}{}
+		for _, it := range sf.GetPackedSinglePointWithSCD() {
+			m := map[string]interface{}{"ioa": uint(it.Ioa), "scd": uint32(it.Scd), "qds": byte(it.Qds)}
+			arr = append(arr, m)
+		}
+		value = arr
+	case M_EI_NA_1:
+		ioa, coi := sf.GetEndOfInitialization()
+		value = map[string]interface{}{"ioa": uint(ioa), "cause": byte(coi.Cause), "localChange": coi.IsLocalChange}
+	// Control commands single element
+	case C_SC_NA_1, C_SC_TA_1:
+		cmd := sf.GetSingleCmd()
+		value = map[string]interface{}{"ioa": uint(cmd.Ioa), "value": cmd.Value, "qoc": cmd.Qoc.Value(), "time": ts(cmd.Time)}
+	case C_DC_NA_1, C_DC_TA_1:
+		cmd := sf.GetDoubleCmd()
+		value = map[string]interface{}{"ioa": uint(cmd.Ioa), "value": byte(cmd.Value), "qoc": cmd.Qoc.Value(), "time": ts(cmd.Time)}
+	case C_RC_NA_1, C_RC_TA_1:
+		cmd := sf.GetStepCmd()
+		value = map[string]interface{}{"ioa": uint(cmd.Ioa), "value": byte(cmd.Value), "qoc": cmd.Qoc.Value(), "time": ts(cmd.Time)}
+	case C_SE_NA_1, C_SE_TA_1:
+		cmd := sf.GetSetpointNormalCmd()
+		value = map[string]interface{}{"ioa": uint(cmd.Ioa), "value": cmd.Value.Float64(), "qos": cmd.Qos.Value(), "time": ts(cmd.Time)}
+	case C_SE_NB_1, C_SE_TB_1:
+		cmd := sf.GetSetpointCmdScaled()
+		value = map[string]interface{}{"ioa": uint(cmd.Ioa), "value": cmd.Value, "qos": cmd.Qos.Value(), "time": ts(cmd.Time)}
+	case C_SE_NC_1, C_SE_TC_1:
+		cmd := sf.GetSetpointFloatCmd()
+		value = map[string]interface{}{"ioa": uint(cmd.Ioa), "value": cmd.Value, "qos": cmd.Qos.Value(), "time": ts(cmd.Time)}
+	case C_BO_NA_1, C_BO_TA_1:
+		cmd := sf.GetBitsString32Cmd()
+		value = map[string]interface{}{"ioa": uint(cmd.Ioa), "value": cmd.Value, "time": ts(cmd.Time)}
+	case C_IC_NA_1:
+		ioa, qoi := sf.GetInterrogationCmd()
+		value = map[string]interface{}{"ioa": uint(ioa), "qoi": byte(qoi)}
+	default:
+		// For unknown types, return raw payload length as meta
+		value = map[string]interface{}{"items": int(sf.Variable.Number), "payload": len(sf.InfoObj)}
+	}
+
+	out := map[string]interface{}{
+		"type":       sf.Type,
+		"variable":   sf.Variable,
+		"cause":      sf.Coa,
+		"origAddr":   sf.OrigAddr,
+		"commonAddr": sf.CommonAddr,
+		"value":      value,
+	}
+	return json.Marshal(out)
 }

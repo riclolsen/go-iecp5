@@ -4,6 +4,11 @@
 
 package asdu
 
+import (
+	"strconv"
+	"strings"
+)
+
 // about information object Application Service Data Unit -Information Object
 
 // InfoObjAddr is the information object address.
@@ -33,6 +38,19 @@ func (sf SinglePoint) Value() byte {
 	return byte(sf & 0x01)
 }
 
+// String returns a human-readable representation of SinglePoint without the SP prefix
+func (sf SinglePoint) String() string {
+	switch sf.Value() {
+	case 0:
+		return "Off"
+	case 1:
+		return "On"
+	default:
+		// Should not happen due to mask, but keep safe
+		return "Unknown"
+	}
+}
+
 // DoublePoint is a measured value of a determination aware switch.
 // See companion standard 101, subclass 7.2.6.2.
 type DoublePoint byte
@@ -50,9 +68,53 @@ func (sf DoublePoint) Value() byte {
 	return byte(sf & 0x03)
 }
 
+// String returns a human-readable representation of DoublePoint without the DP prefix
+func (sf DoublePoint) String() string {
+	switch sf.Value() {
+	case 0:
+		return "IndeterminateOrIntermediate"
+	case 1:
+		return "DeterminedOff"
+	case 2:
+		return "DeterminedOn"
+	case 3:
+		return "Indeterminate"
+	default:
+		return "Unknown"
+	}
+}
+
 // QualityDescriptor Quality descriptor flags attribute measured values.
 // See companion standard 101, subclass 7.2.6.3.
 type QualityDescriptor byte
+
+// String returns a human-readable representation of the quality flags.
+func (q QualityDescriptor) String() string {
+	if q == QDSGood {
+		return "Good"
+	}
+	parts := make([]string, 0, 5)
+	if q&QDSOverflow != 0 {
+		parts = append(parts, "Overflow")
+	}
+	if q&QDSBlocked != 0 {
+		parts = append(parts, "Blocked")
+	}
+	if q&QDSSubstituted != 0 {
+		parts = append(parts, "Substituted")
+	}
+	if q&QDSNotTopical != 0 {
+		parts = append(parts, "NotTopical")
+	}
+	if q&QDSInvalid != 0 {
+		parts = append(parts, "Invalid")
+	}
+	// If none of the named flags matched but q!=0 (e.g., reserved bits), show hex value
+	if len(parts) == 0 {
+		return "QualityDescriptor(" + strconv.FormatUint(uint64(q), 16) + ")"
+	}
+	return strings.Join(parts, ",")
+}
 
 // QualityDescriptor defined.
 const (
@@ -76,7 +138,7 @@ const (
 	QDSGood QualityDescriptor = 0
 )
 
-//QualityDescriptorProtection  Quality descriptor Protection Equipment flags attribute.
+// QualityDescriptorProtection  Quality descriptor Protection Equipment flags attribute.
 // See companion standard 101, subclass 7.2.6.4.
 type QualityDescriptorProtection byte
 
@@ -210,8 +272,8 @@ type SingleCommand byte
 
 // SingleCommand defined
 const (
-	SCOOn SingleCommand = iota
-	SCOOff
+	SCOOff SingleCommand = iota
+	SCOOn
 )
 
 // DoubleCommand double command
@@ -221,8 +283,8 @@ type DoubleCommand byte
 // DoubleCommand defined
 const (
 	DCONotAllow0 DoubleCommand = iota
-	DCOOn
 	DCOOff
+	DCOOn
 	DCONotAllow3
 )
 
@@ -257,7 +319,8 @@ const (
 // CauseOfInitial cause of initial
 // Cause:  see COICause
 // IsLocalChange: false - Initialization of local parameters unchanged
-//                true - Initialization after changing local parameters
+//
+//	true - Initialization after changing local parameters
 type CauseOfInitial struct {
 	Cause         COICause
 	IsLocalChange bool
@@ -445,6 +508,23 @@ const (
 	//	16‥31: reserved for special use (private range)
 )
 
+// String returns a human-readable representation of QOCQual
+func (q QOCQual) String() string {
+	switch q {
+	case QOCNoAdditionalDefinition:
+		return "NoAdditionalDefinition"
+	case QOCShortPulseDuration:
+		return "ShortPulseDuration"
+	case QOCLongPulseDuration:
+		return "LongPulseDuration"
+	case QOCPersistentOutput:
+		return "PersistentOutput"
+	default:
+		// show numeric value for reserved/private ranges
+		return "QOCQual(" + strconv.FormatUint(uint64(q), 10) + ")"
+	}
+}
+
 // QualifierOfCommand is a  qualifier of command.
 // See companion standard 101, subclass 7.2.6.26.
 // See section 5, subclass 6.8.
@@ -452,6 +532,16 @@ const (
 type QualifierOfCommand struct {
 	Qual     QOCQual
 	InSelect bool
+}
+
+// String returns a human-readable representation of QualifierOfCommand
+// Format: "Select|Execute:<QOCQual>" where Select is used when InSelect is true and Execute otherwise.
+func (sf QualifierOfCommand) String() string {
+	mode := "Execute"
+	if sf.InSelect {
+		mode = "Select"
+	}
+	return mode + ":" + sf.Qual.String()
 }
 
 // ParseQualifierOfCommand parse byte to QualifierOfCommand
@@ -493,6 +583,7 @@ TODO: file file related undefined
 
 // QOSQual is the qualifier of a set-point command qual.
 // See companion standard 101, subclass 7.2.6.39.
+//
 //	0: default
 //	0‥63: reserved for standard definitions of sf companion standard (compatible range)
 //	64‥127: reserved for special use (private range)
@@ -521,6 +612,16 @@ func (sf QualifierOfSetpointCmd) Value() byte {
 		v |= 0x80
 	}
 	return v
+}
+
+// String returns a human-readable representation of QualifierOfSetpointCmd
+// Format: "Select|Execute:QOSQual(n)" where Select is used when InSelect is true and Execute otherwise.
+func (sf QualifierOfSetpointCmd) String() string {
+	mode := "Execute"
+	if sf.InSelect {
+		mode = "Select"
+	}
+	return mode + ":" + "QOSQual(" + strconv.FormatUint(uint64(sf.Qual), 10) + ")"
 }
 
 // StatusAndStatusChangeDetection

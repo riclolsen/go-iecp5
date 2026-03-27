@@ -136,7 +136,7 @@ func TestDoubleCmd(t *testing.T) {
 			"C_DC_NA_1",
 			args{
 				newConn([]byte{byte(C_DC_NA_1), 0x01, 0x06, 0x00, 0x34, 0x12,
-					0x90, 0x78, 0x56, 0x05}, t),
+					0x90, 0x78, 0x56, 0x06}, t),
 				C_DC_NA_1,
 				CauseOfTransmission{Cause: Activation},
 				0x1234,
@@ -150,7 +150,7 @@ func TestDoubleCmd(t *testing.T) {
 			"C_DC_TA_1 CP56Time2a",
 			args{
 				newConn(append([]byte{byte(C_DC_TA_1), 0x01, 0x06, 0x00, 0x34, 0x12,
-					0x90, 0x78, 0x56, 0x06}, tm0CP56Time2aBytes...), t),
+					0x90, 0x78, 0x56, 0x05}, tm0CP56Time2aBytes...), t),
 				C_DC_TA_1,
 				CauseOfTransmission{Cause: Activation},
 				0x1234,
@@ -578,7 +578,7 @@ func TestASDU_GetDoubleCmd(t *testing.T) {
 			fields{
 				ParamsWide,
 				Identifier{Type: C_DC_NA_1},
-				[]byte{0x90, 0x78, 0x56, 0x05}},
+				[]byte{0x90, 0x78, 0x56, 0x06}},
 			DoubleCommandInfo{
 				0x567890,
 				DCOOn,
@@ -591,7 +591,7 @@ func TestASDU_GetDoubleCmd(t *testing.T) {
 			fields{
 				ParamsWide,
 				Identifier{Type: C_DC_TA_1},
-				append([]byte{0x90, 0x78, 0x56, 0x06}, tm0CP56Time2aBytes...)},
+				append([]byte{0x90, 0x78, 0x56, 0x05}, tm0CP56Time2aBytes...)},
 			DoubleCommandInfo{
 				0x567890,
 				DCOOff,
