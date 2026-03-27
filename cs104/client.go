@@ -66,6 +66,7 @@ type Client struct {
 	onConnect        func(c *Client)
 	onConnectionLost func(c *Client)
 	onConnectTimeout func(c *Client)
+	onServerActive   func(c *Client)
 }
 
 // NewClient returns an IEC104 master,default config and default asdu.ParamsWide params
@@ -81,6 +82,7 @@ func NewClient(handler ClientHandlerInterface, o *ClientOption) *Client {
 		onConnect:        func(*Client) {},
 		onConnectionLost: func(*Client) {},
 		onConnectTimeout: func(*Client) {},
+		onServerActive:   func(*Client) {},
 	}
 }
 
@@ -104,6 +106,14 @@ func (sf *Client) SetConnectionLostHandler(f func(c *Client)) *Client {
 func (sf *Client) SetConnectTimeoutHandler(f func(c *Client)) *Client {
 	if f != nil {
 		sf.onConnectTimeout = f
+	}
+	return sf
+}
+
+// SetServerActiveHandler set server active handler
+func (sf *Client) SetServerActiveHandler(f func(c *Client)) *Client {
+	if f != nil {
+		sf.onServerActive = f
 	}
 	return sf
 }
@@ -401,6 +411,7 @@ func (sf *Client) run(ctx context.Context) {
 				case uStartDtConfirm:
 					atomic.StoreUint32(&sf.isActive, active)
 					sf.startDtActiveSendSince.Store(willNotTimeout)
+					go sf.onServerActive(sf)
 				//case uStopDtActive:
 				//	sf.sendUFrame(uStopDtConfirm)
 				//	atomic.StoreUint32(&sf.isActive, inactive)

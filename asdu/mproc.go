@@ -297,7 +297,7 @@ func step(c Connect, typeID TypeID, isSequence bool, coa CauseOfTransmission, ca
 		case M_ST_NA_1:
 		case M_ST_TA_1:
 			u.AppendBytes(CP24Time2a(v.Time, u.InfoObjTimeZone)...)
-		case M_SP_TB_1:
+		case M_ST_TB_1:
 			u.AppendBytes(CP56Time2a(v.Time, u.InfoObjTimeZone)...)
 		default:
 			return ErrTypeIDNotMatch
@@ -357,7 +357,7 @@ func StepCP56Time2a(c Connect, coa CauseOfTransmission, ca CommonAddr, infos ...
 		coa.Cause == ReturnInfoRemote || coa.Cause == ReturnInfoLocal) {
 		return ErrCmdCause
 	}
-	return step(c, M_SP_TB_1, false, coa, ca, infos...)
+	return step(c, M_ST_TB_1, false, coa, ca, infos...)
 }
 
 // BitString32Info the measured value attributes.
@@ -370,10 +370,7 @@ type BitString32Info struct {
 	Time time.Time
 }
 
-// bitString32 sends a type identification [M_BO_NA_1], [M_BO_TA_1] or [M_BO_TB_1].比特位串
-// [M_ST_NA_1] See companion standard 101, subclass 7.3.1.7
-// [M_ST_TA_1] See companion standard 101, subclass 7.3.1.8
-// [M_ST_TB_1] See companion standard 101, subclass 7.3.1.25
+// bitString32 sends a type identification [M_BO_NA_1], [M_BO_TA_1] or [M_BO_TB_1].
 func bitString32(c Connect, typeID TypeID, isSequence bool, coa CauseOfTransmission, ca CommonAddr, infos ...BitString32Info) error {
 	if err := checkValid(c, typeID, isSequence, len(infos)); err != nil {
 		return err
@@ -413,7 +410,7 @@ func bitString32(c Connect, typeID TypeID, isSequence bool, coa CauseOfTransmiss
 }
 
 // BitString32 sends a type identification [M_BO_NA_1]. Bit string
-// [M_ST_NA_1] See companion standard 101, subclass 7.3.1.7
+// [M_BO_NA_1] See companion standard 101, subclass 7.3.1.7
 // send reason (coa) for
 // monitor direction:
 // <2> := background scan
@@ -432,7 +429,7 @@ func BitString32(c Connect, isSequence bool, coa CauseOfTransmission, ca CommonA
 }
 
 // BitString32CP24Time2a sends a type identification [M_BO_TA_1]. CP24Time2a bit string with time stamp, only (SQ = 0) a single information element set
-// [M_ST_TA_1] See companion standard 101, subclass 7.3.1.8
+// [M_BO_TA_1] See companion standard 101, subclass 7.3.1.8
 // send reason (coa) for
 // monitor direction:
 // <3> := burst (spontaneous)
@@ -445,7 +442,7 @@ func BitString32CP24Time2a(c Connect, coa CauseOfTransmission, ca CommonAddr, in
 }
 
 // BitString32CP56Time2a sends a type identification [M_BO_TB_1]. CP56Time2a bit string with time stamp, only (SQ = 0) a single information element set
-// [M_ST_TB_1] See companion standard 101, subclass 7.3.1.25
+// [M_BO_TB_1] See companion standard 101, subclass 7.3.1.25
 // send reason (coa) for
 // monitor direction:
 // <3> := burst (spontaneous)
@@ -546,7 +543,7 @@ func MeasuredValueNormalCP24Time2a(c Connect, coa CauseOfTransmission,
 	return measuredValueNormal(c, M_ME_TA_1, false, coa, ca, infos...)
 }
 
-// MeasuredValueNormalCP56Time2a sends a type identification [ M_ME_TD_1] Measured value with time stamp CP57Time2a, normalized value, only (SQ = 0) a single information element set
+// MeasuredValueNormalCP56Time2a sends a type identification [M_ME_TD_1] Measured value with time stamp CP57Time2a, normalized value, only (SQ = 0) a single information element set
 // [M_ME_TD_1] See companion standard 101, subclass 7.3.1.26
 // send reason (coa) for
 // monitor direction:
