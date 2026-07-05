@@ -223,7 +223,14 @@ func (sf *Client) recvLoop() {
 				}
 			} else {
 				if rawData[0] != startFrame {
-					rdCnt, length = 0, 2
+					// resync: keep a start character seen in the second
+					// position instead of discarding it
+					if rawData[1] == startFrame {
+						rawData[0] = startFrame
+						rdCnt, length = 1, 2
+					} else {
+						rdCnt, length = 0, 2
+					}
 					continue
 				}
 				length = int(rawData[1]) + 2
@@ -234,7 +241,11 @@ func (sf *Client) recvLoop() {
 				if rdCnt == length {
 					apdu := rawData[:length]
 					sf.Debug("RX Raw[% x]", apdu)
-					sf.rcvRaw <- apdu
+					select {
+					case sf.rcvRaw <- apdu:
+					case <-sf.ctx.Done():
+						return
+					}
 				}
 			}
 		}
@@ -333,7 +344,9 @@ func (sf *Client) run(ctx context.Context) {
 
 	sf.onConnect(sf)
 	for {
-		if atomic.LoadUint32(&sf.isActive) == active && seqNoCount(sf.ackNoSend, sf.seqNoSend) <= sf.option.config.SendUnAckLimitK {
+		// "k" is the maximum number of outstanding (unacknowledged) I-frames,
+		// so stop handing out new ones once the count reaches k.
+		if atomic.LoadUint32(&sf.isActive) == active && seqNoCount(sf.ackNoSend, sf.seqNoSend) < sf.option.config.SendUnAckLimitK {
 			select {
 			case o := <-sf.sendASDU:
 				sendIFrame(o)
@@ -401,7 +414,11 @@ func (sf *Client) run(ctx context.Context) {
 					return
 				}
 
-				sf.rcvASDU <- asduVal
+				select {
+				case sf.rcvASDU <- asduVal:
+				case <-sf.ctx.Done():
+					return
+				}
 				if sf.ackNoRcv == sf.seqNoRcv { // first unacked
 					unAckRcvSince = time.Now()
 				}
@@ -512,9 +529,10 @@ func (sf *Client) updateAckNoOut(ackNo uint16) (ok bool) {
 		return false
 	}
 
-	// confirm reception
+	// confirm reception; sequence numbers live in [0, 32767], so the
+	// "previous" of 0 wraps to 32767 (not 65535 as plain uint16 math gives).
 	for i, v := range sf.pending {
-		if v.seq == (ackNo - 1) {
+		if v.seq == (ackNo-1)&32767 {
 			sf.pending = sf.pending[i+1:]
 			break
 		}

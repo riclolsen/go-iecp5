@@ -8,7 +8,6 @@ import (
 	"context"
 	"crypto/tls"
 	"net"
-	"os"
 	"sync"
 	"time"
 
@@ -74,8 +73,9 @@ func (sf *Server) SetTLSConfig(t *tls.Config) *Server {
 	return sf
 }
 
-// ListenAndServer run the server
-func (sf *Server) ListenAndServer(addr string) {
+// ListenAndServer run the server. It blocks until the listener fails or the
+// server is closed, and returns the error that stopped it.
+func (sf *Server) ListenAndServer(addr string) error {
 	var listen net.Listener
 	var err error
 
@@ -87,8 +87,7 @@ func (sf *Server) ListenAndServer(addr string) {
 
 	if err != nil {
 		sf.Critical("server run failed, %v", err)
-		os.Exit(1)
-		return
+		return err
 	}
 	sf.mux.Lock()
 	sf.listen = listen
@@ -105,8 +104,7 @@ func (sf *Server) ListenAndServer(addr string) {
 		conn, err := listen.Accept()
 		if err != nil {
 			sf.Critical("server run failed, %v", err)
-			os.Exit(1)
-			return
+			return err
 		}
 
 		sf.wg.Add(1)
@@ -185,7 +183,10 @@ func (sf *Server) SetConnectionLostHandler(f func(asdu.Connect)) {
 
 // Get the number of sessions
 func (sf *Server) GetSessionsLen() int {
-	return len(sf.sessions)
+	sf.mux.Lock()
+	n := len(sf.sessions)
+	sf.mux.Unlock()
+	return n
 }
 
 func (sf *Server) SetServerNumber(n int) {

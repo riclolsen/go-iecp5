@@ -16,6 +16,7 @@ type ClientOption struct {
 	params            asdu.Params
 	autoReconnect     bool          // Whether to attempt reconnection on serial port errors
 	reconnectInterval time.Duration // Reconnection attempt interval
+	secondaryAddrs    []uint16      // Link addresses of the secondary stations to serve (unbalanced multi-drop)
 }
 
 // NewOption creates a new ClientOption with default CS101 config and standard CS101 ASDU params.
@@ -60,5 +61,19 @@ func (sf *ClientOption) SetReconnectInterval(t time.Duration) *ClientOption {
 // SetAutoReconnect enables or disables automatic reconnection attempts.
 func (sf *ClientOption) SetAutoReconnect(b bool) *ClientOption {
 	sf.autoReconnect = b
+	return sf
+}
+
+// AddSecondaryAddress adds the link address of a secondary station to the
+// set of stations the primary polls (unbalanced multi-drop). If no address
+// is added, Config.LinkAddress is used as the single secondary station.
+// Duplicate addresses are ignored. Not used in balanced mode.
+func (sf *ClientOption) AddSecondaryAddress(addr uint16) *ClientOption {
+	for _, a := range sf.secondaryAddrs {
+		if a == addr {
+			return sf
+		}
+	}
+	sf.secondaryAddrs = append(sf.secondaryAddrs, addr)
 	return sf
 }

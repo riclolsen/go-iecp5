@@ -25,8 +25,14 @@ func CP56Time2a(t time.Time, loc *time.Location) []byte {
 	}
 	ts := t.In(loc)
 	msec := ts.Nanosecond()/int(time.Millisecond) + ts.Second()*1000
+	// IEC 60870-5-4 day of week: 1 = Monday .. 7 = Sunday (0 = not used).
+	// Go's Weekday has Sunday = 0, so map it to 7.
+	dow := byte(ts.Weekday())
+	if dow == 0 {
+		dow = 7
+	}
 	return []byte{byte(msec), byte(msec >> 8), byte(ts.Minute()), byte(ts.Hour()),
-		byte(ts.Weekday()<<5) | byte(ts.Day()), byte(ts.Month()), byte(ts.Year() - 2000)}
+		dow<<5 | byte(ts.Day()), byte(ts.Month()), byte(ts.Year() - 2000)}
 }
 
 // ParseCP56Time2a 7 octets binary time, it is recommended to use UTC for all time stamps, read 7 bytes, return time
@@ -74,20 +80,24 @@ func ParseCP24Time2a(bytes []byte, loc *time.Location) time.Time {
 	msec := x % 1000
 	sec := (x / 1000)
 	min := int(bytes[2] & 0x3f)
-	now := time.Now()
-	year, month, day := now.Date()
-	hour, _, _ := now.Clock()
 
-	nsec := msec * int(time.Millisecond)
 	if loc == nil {
 		loc = time.UTC
 	}
+	now := time.Now().In(loc)
+	year, month, day := now.Date()
+	hour, currentMin, _ := now.Clock()
+
+	nsec := msec * int(time.Millisecond)
 	val := time.Date(year, month, day, hour, min, sec, nsec, loc)
 
-	////5 minute rounding - 55 minute span
-	//if min > currentMin+5 {
-	//	val = val.Add(-time.Hour)
-	//}
+	// CP24Time2a only carries minutes and milliseconds; the date and hour are
+	// taken from the local clock. If the encoded minute is well ahead of the
+	// current minute, the tag belongs to the previous hour (5 minute skew
+	// allowance, 55 minute span).
+	if min > currentMin+5 {
+		val = val.Add(-time.Hour)
+	}
 
 	return val
 }

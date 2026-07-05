@@ -70,8 +70,8 @@ const (
 	// DFC: Data Flow Control bit (part of func code)
 	SecFcConfACK       byte = 0 // Confirm: Positive acknowledge (ACK)
 	SecFcConfNACK      byte = 1 // Confirm: Negative acknowledge (NACK, link busy)
-	SecFcUserDataConf  byte = 8 // User data, confirmed
-	SecFcUserDataNoRep byte = 9 // User data, no reply expected
+	SecFcUserDataConf  byte = 8 // Respond: User data
+	SecFcUserDataNoRep byte = 9 // Respond: NACK - requested data not available
 	// --- Request/Respond Functions ---
 	SecFcRespStatus byte = 11 // Respond: Status of link / Access Demand
 	SecFcRespLinkNF byte = 14 // Respond: NACK - Link service not functioning
@@ -80,6 +80,7 @@ const (
 
 // ControlField represents the parsed control field byte
 type ControlField struct {
+	DIR bool // Direction bit (balanced mode only: 1 = station A to B)
 	PRM bool // Primary Message (true if from primary station)
 	FCB bool // Frame Count Bit
 	FCV bool // Frame Count Valid
@@ -91,6 +92,7 @@ type ControlField struct {
 // ParseControlField parses the control field byte.
 func ParseControlField(b byte) ControlField {
 	cf := ControlField{
+		DIR: (b & CtrlDIR) != 0,
 		PRM: (b & CtrlPRM) != 0,
 		Fun: b & CtrlFuncMask,
 	}
@@ -108,6 +110,9 @@ func ParseControlField(b byte) ControlField {
 // Value encodes the ControlField struct back to a byte.
 func (cf ControlField) Value() byte {
 	var b byte
+	if cf.DIR {
+		b |= CtrlDIR
+	}
 	if cf.PRM {
 		b |= CtrlPRM
 		if cf.FCB {
@@ -117,9 +122,12 @@ func (cf ControlField) Value() byte {
 			b |= CtrlFCV
 		}
 	} else {
-		// Reconstruct secondary function code based on ACD/DFC and base function if needed.
-		// This logic depends heavily on how secondary function codes are defined.
-		// Assuming cf.Fun already holds the correct secondary code:
+		if cf.ACD {
+			b |= CtrlACD
+		}
+		if cf.DFC {
+			b |= CtrlDFC
+		}
 	}
 	b |= (cf.Fun & CtrlFuncMask)
 	return b
@@ -130,6 +138,9 @@ func (cf ControlField) String() string {
 	prm := "SEC"
 	if cf.PRM {
 		prm = "PRM"
+	}
+	if cf.DIR {
+		prm = prm + ",DIR"
 	}
 	fcb := ""
 	if cf.FCV {
@@ -268,8 +279,11 @@ func ParseFrame(r io.Reader, linkAddrSize byte, ctx *context.Context) (*Frame, e
 		if frame.Length1 != frame.Length2 {
 			return nil, fmt.Errorf("%w: L1=0x%02X, L2=0x%02X", ErrLengthMismatch, frame.Length1, frame.Length2)
 		}
-		if frame.Length1 < linkAddrSize { // Length includes LinkAddr + ASDU
-			return nil, fmt.Errorf("%w: length %d less than link address size %d", ErrFrameTooShort, frame.Length1, linkAddrSize)
+		// The length field counts Control + LinkAddr + ASDU, so anything
+		// shorter than 1+linkAddrSize is malformed (and would make the ASDU
+		// slice bounds below invalid).
+		if frame.Length1 < 1+linkAddrSize {
+			return nil, fmt.Errorf("%w: length %d less than control+link address size %d", ErrFrameTooShort, frame.Length1, 1+linkAddrSize)
 		}
 		// Check against overall max length (Start+L1+L2+Start2+Ctrl+CS+End = 7 bytes overhead)
 		if frame.Length1 > MaxFrameLen-6 {

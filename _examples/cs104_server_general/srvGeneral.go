@@ -23,7 +23,9 @@ func main() {
 	// 	err := srv.Close()
 	// 	log.Println("ooooooo", err)
 	// }()
-	srv.ListenAndServer(":2404")
+	if err := srv.ListenAndServer(":2404"); err != nil {
+		log.Fatalf("server stopped: %v", err)
+	}
 }
 
 type mysrv struct{}
@@ -64,3 +66,4 @@ func (sf *mysrv) ResetProcessHandler(asdu.Connect, *asdu.ASDU, asdu.QualifierOfR
 }
 func (sf *mysrv) DelayAcquisitionHandler(asdu.Connect, *asdu.ASDU, uint16) error { return nil }
 func (sf *mysrv) ASDUHandler(asdu.Connect, *asdu.ASDU) error                     { return nil }
+func (sf *mysrv) ASDUHandlerAll(asdu.Connect, *asdu.ASDU, int) error             { return nil }

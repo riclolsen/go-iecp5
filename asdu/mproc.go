@@ -974,7 +974,7 @@ func packedStartEventsOfProtectionEquipment(c Connect, typeID TypeID, coa CauseO
 	if err := u.AppendInfoObjAddr(info.Ioa); err != nil {
 		return err
 	}
-	u.AppendBytes(byte(info.Event), byte(info.Qdp)&0xf1)
+	u.AppendBytes(byte(info.Event), byte(info.Qdp)&0xf8)
 	u.AppendCP16Time2a(info.Msec)
 	switch typeID {
 	case M_EP_TB_1:
@@ -1038,7 +1038,7 @@ func packedOutputCircuitInfo(c Connect, typeID TypeID, coa CauseOfTransmission, 
 	if err := u.AppendInfoObjAddr(info.Ioa); err != nil {
 		return err
 	}
-	u.AppendBytes(byte(info.Oci), byte(info.Qdp)&0xf1)
+	u.AppendBytes(byte(info.Oci), byte(info.Qdp)&0xf8)
 	u.AppendCP16Time2a(info.Msec)
 	switch typeID {
 	case M_EP_TC_1:
@@ -1425,7 +1425,7 @@ func (sf *ASDU) GetEventOfProtectionEquipment() []EventOfProtectionEquipmentInfo
 		info = append(info, EventOfProtectionEquipmentInfo{
 			Ioa:   infoObjAddr,
 			Event: SingleEvent(value & 0x03),
-			Qdp:   QualityDescriptorProtection(value & 0xf1),
+			Qdp:   QualityDescriptorProtection(value & 0xf8),
 			Msec:  msec,
 			Time:  t})
 	}
@@ -1442,7 +1442,7 @@ func (sf *ASDU) GetPackedStartEventsOfProtectionEquipment() PackedStartEventsOfP
 
 	info.Ioa = sf.DecodeInfoObjAddr()
 	info.Event = StartEvent(sf.DecodeByte())
-	info.Qdp = QualityDescriptorProtection(sf.DecodeByte() & 0xf1)
+	info.Qdp = QualityDescriptorProtection(sf.DecodeByte() & 0xf8)
 	info.Msec = sf.DecodeCP16Time2a()
 	switch sf.Type {
 	case M_EP_TB_1:
@@ -1465,7 +1465,7 @@ func (sf *ASDU) GetPackedOutputCircuitInfo() PackedOutputCircuitInfoInfo {
 
 	info.Ioa = sf.DecodeInfoObjAddr()
 	info.Oci = OutputCircuitInfo(sf.DecodeByte())
-	info.Qdp = QualityDescriptorProtection(sf.DecodeByte() & 0xf1)
+	info.Qdp = QualityDescriptorProtection(sf.DecodeByte() & 0xf8)
 	info.Msec = sf.DecodeCP16Time2a()
 	switch sf.Type {
 	case M_EP_TC_1:

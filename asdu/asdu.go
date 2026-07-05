@@ -843,6 +843,10 @@ func (sf *ASDU) MarshalJSON() ([]byte, error) {
 	if sf == nil {
 		return []byte("null"), nil
 	}
+	// The Get* decoders below consume InfoObj by re-slicing it; save and
+	// restore so marshaling leaves the ASDU usable (same as String()).
+	saved := sf.InfoObj
+	defer func() { sf.InfoObj = saved }()
 	// Helper for time formatting
 	ts := func(t time.Time) string {
 		if t.IsZero() {

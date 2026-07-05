@@ -11,8 +11,9 @@ var (
 	tm0CP56Time2aBytes = []byte{0x01, 0x02, 0x03, 0x04, 0x65, 0x06, 0x13}
 	tm0CP24Time2aBytes = tm0CP56Time2aBytes[:3]
 
+	// 2019-12-15 is a Sunday: day-of-week bits (7<<5) are set in octet 4.
 	tm1                = time.Date(2019, 12, 15, 14, 13, 3, 83000000, time.UTC)
-	tm1CP56Time2aBytes = []byte{0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x0c, 0x13}
+	tm1CP56Time2aBytes = []byte{0x0b, 0x0c, 0x0d, 0x0e, 0xef, 0x0c, 0x13}
 	tm1CP24Time2aBytes = tm1CP56Time2aBytes[:3]
 )
 

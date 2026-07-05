@@ -61,6 +61,9 @@ func (myClient) ResetProcessHandler(asdu.Connect, *asdu.ASDU) error {
 func (myClient) DelayAcquisitionHandler(asdu.Connect, *asdu.ASDU) error {
 	return nil
 }
-func (myClient) ASDUHandler(asdu.Connect, *asdu.ASDU) error {
+func (myClient) ASDUHandler(asdu.Connect, *asdu.ASDU, *cs104.Server, int) error {
+	return nil
+}
+func (myClient) ASDUHandlerAll(asdu.Connect, *asdu.ASDU, *cs104.Server, int) error {
 	return nil
 }

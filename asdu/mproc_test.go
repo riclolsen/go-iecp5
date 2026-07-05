@@ -535,9 +535,9 @@ func TestStepCP56Time2a(t *testing.T) {
 			true,
 		},
 		{
-			"M_SP_TB_1 CP56Time2a Number = 2",
+			"M_ST_TB_1 CP56Time2a Number = 2",
 			args{
-				newConn(append(append([]byte{byte(M_SP_TB_1), 0x02, 0x03, 0x00, 0x34, 0x12},
+				newConn(append(append([]byte{byte(M_ST_TB_1), 0x02, 0x03, 0x00, 0x34, 0x12},
 					append([]byte{0x01, 0x00, 0x00, 0x01, 0x10}, tm0CP56Time2aBytes...)...),
 					append([]byte{0x02, 0x00, 0x00, 0x02, 0x10}, tm0CP56Time2aBytes...)...), t),
 				CauseOfTransmission{Cause: Spontaneous},

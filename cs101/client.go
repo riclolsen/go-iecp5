@@ -6,10 +6,11 @@ package cs101
 
 import (
 	"context"
-	"encoding/binary" // Re-add missing import
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -34,6 +35,38 @@ const (
 	linkStateActive
 )
 
+// secondary station link phase (primary point of view)
+type secondaryPhase byte
+
+const (
+	phaseStatus secondaryPhase = iota // request status of link pending
+	phaseReset                        // reset of remote link pending
+	phaseActive                       // link layer active
+)
+
+// secondaryState is the per-secondary-station link state kept by the primary.
+// The FCB alternates per station across ALL frames sent with FCV=1
+// (user data, class 1/2 requests, test link), as required by IEC 60870-5-2.
+type secondaryState struct {
+	addr       uint16
+	phase      secondaryPhase
+	fcb        bool // FCB of the next FCV frame sent to this station
+	wantClass1 bool // ACD seen: a class 1 data request is due
+}
+
+// outgoingASDU is a queued application message with its target station.
+type outgoingASDU struct {
+	a    *asdu.ASDU
+	addr uint16
+}
+
+// pendingSend is the confirmed frame awaiting ACK/RESP from the secondary.
+type pendingSend struct {
+	frame *Frame
+	ctrl  ControlField
+	addr  uint16
+}
+
 // Client is an IEC101 Primary Station (Master)
 type Client struct {
 	option       ClientOption
@@ -45,23 +78,26 @@ type Client struct {
 	rcvFrame  chan *Frame     // Parsed incoming frames
 	sendFrame chan *Frame     // Frames to be sent
 	rcvASDU   chan *asdu.ASDU // Decoded ASDUs from variable frames
+	linkReq   chan byte       // manual link-layer requests executed by the run loop
 
-	sendQueue      []*asdu.ASDU // Queue for outgoing ASDUs when link is busy
-	sendQueueMutex sync.Mutex   // Mutex to protect sendQueue
+	sendQueue      []outgoingASDU // Queue for outgoing ASDUs
+	sendQueueMutex sync.Mutex     // Mutex to protect sendQueue
 
-	// CS101 Link Layer State
-	fcbState          bool   // Expected Frame Count Bit state for next confirmed send
-	lastSentConfFrame *Frame // Last sent frame requiring confirmation (ACK/NACK)
-	lastSentConfTime  time.Time
-	lastRecvTime      time.Time
-	retryCount        int
-	t1Timer           *time.Timer // Response timeout timer (T1/T2)
-	t3Timer           *time.Timer // Idle timeout timer (T3)
-	timerTrySend      *time.Timer // Timer to attempt resending frames
+	// CS101 Link Layer State — owned by the runProtocol goroutine
+	secs        map[uint16]*secondaryState
+	secOrder    []uint16
+	pollIdx     int
+	lastSent    *pendingSend // outstanding confirmed frame (nil when link free)
+	retryCount  int
+	fcbExpected bool // balanced mode: expected FCB of the peer's next FCV frame
+
+	t1Timer      *time.Timer // Response timeout timer (T1/T2)
+	t3Timer      *time.Timer // Idle timeout timer (T3)
+	timerTrySend *time.Timer // Timer pacing polls and queued sends
 
 	// Connection Status
-	connStatus uint32 // Uses statusInitial, statusConnecting, etc.
-	linkStatus uint32 // Uses linkStateReset, linkStateActive
+	connStatus uint32 // statusInitial, statusConnecting, ...
+	linkStatus uint32 // linkStateReset / linkStateActive (any station active)
 	rwMux      sync.RWMutex
 
 	// Logging and Control
@@ -98,17 +134,17 @@ func NewClient(handler ClientHandlerInterface, o *ClientOption) *Client {
 	// Basic check for serial config presence
 	if opt.config.Serial.Address == "" {
 		tempLogger.Error("Serial port address (e.g., COM3 or /dev/ttyS0) must be set in ClientOption.Serial")
-		// Return nil or handle error appropriately? Returning nil for now.
 		return nil
 	}
 
 	client := &Client{
 		option:           opt,
 		handler:          handler,
-		rcvFrame:         make(chan *Frame, 20), // Adjust buffer sizes as needed
+		rcvFrame:         make(chan *Frame, 20),
 		sendFrame:        make(chan *Frame, 20),
 		rcvASDU:          make(chan *asdu.ASDU, 50),
-		sendQueue:        make([]*asdu.ASDU, 0, opt.config.MaxSendQueueSize), // Initialize with capacity from config
+		linkReq:          make(chan byte, 8),
+		sendQueue:        make([]outgoingASDU, 0, opt.config.MaxSendQueueSize),
 		Clog:             clog.NewLogger(fmt.Sprintf("cs101 client [%s] => ", opt.config.Serial.Address)),
 		onConnect:        func(*Client) {},
 		onConnectionLost: func(*Client, error) {},
@@ -154,7 +190,6 @@ func (sf *Client) Start() error {
 		sf.rwMux.Unlock()
 		return errors.New("client already started or starting")
 	}
-	sf.lastSentConfFrame = nil
 	sf.connStatus = statusConnecting // Mark as starting
 	sf.ctx, sf.cancel = context.WithCancel(context.Background())
 	sf.rwMux.Unlock()
@@ -179,10 +214,9 @@ func (sf *Client) connectionManager() {
 		}
 
 		sf.setConnectStatus(statusConnecting)
-		sf.Debug("Connecting to serial port %s...", sf.option.config.Serial.Address) // Use Debug
+		sf.Debug("Connecting to serial port %s...", sf.option.config.Serial.Address)
 
 		// --- Attempt to open serial port ---
-		// Using go.bug.st/serial
 		mode := &serial.Mode{
 			BaudRate: sf.option.config.Serial.BaudRate,
 			DataBits: sf.option.config.Serial.DataBits,
@@ -210,14 +244,8 @@ func (sf *Client) connectionManager() {
 			}
 		}
 
-		sf.Debug("Serial port %s connected successfully", sf.option.config.Serial.Address) // Use Debug
+		sf.Debug("Serial port %s connected successfully", sf.option.config.Serial.Address)
 		sf.port = port
-		defer func() {
-			if sf.port != nil {
-				sf.port.Close()
-				sf.port = nil
-			}
-		}()
 		sf.setConnectStatus(statusConnected)
 
 		// Create a context for this specific connection attempt
@@ -236,8 +264,8 @@ func (sf *Client) connectionManager() {
 			sf.Warn("Protocol run ended with error: %v", connectionErr)
 			sf.onConnectionLost(sf, connectionErr)
 		} else {
-			sf.Debug("Protocol run ended gracefully.") // Use Debug
-			sf.onConnectionLost(sf, nil)               // Indicate graceful stop if no error
+			sf.Debug("Protocol run ended gracefully.")
+			sf.onConnectionLost(sf, nil) // Indicate graceful stop if no error
 		}
 
 		// Check if Close() was called or if we should reconnect
@@ -246,10 +274,10 @@ func (sf *Client) connectionManager() {
 			return // Exit if Close() was called
 		default:
 			if !sf.option.autoReconnect {
-				sf.Debug("Auto-reconnect disabled, stopping.") // Use Debug
+				sf.Debug("Auto-reconnect disabled, stopping.")
 				return
 			}
-			sf.Debug("Waiting %.1fs before attempting reconnection...", sf.option.reconnectInterval.Seconds()) // Use Debug
+			sf.Debug("Waiting %.1fs before attempting reconnection...", sf.option.reconnectInterval.Seconds())
 			select {
 			case <-time.After(sf.option.reconnectInterval):
 				// Continue loop to reconnect
@@ -260,20 +288,89 @@ func (sf *Client) connectionManager() {
 	}
 }
 
+// isBalanced reports whether the link operates in balanced mode.
+func (sf *Client) isBalanced() bool {
+	return sf.option.config.Mode == ModeBalanced
+}
+
+// stopTimer stops a timer and drains its channel if it already fired.
+func stopTimer(t *time.Timer) {
+	if !t.Stop() {
+		select {
+		case <-t.C:
+		default:
+		}
+	}
+}
+
+// initSecondaries builds the per-station link state table for this connection.
+func (sf *Client) initSecondaries() {
+	addrs := sf.option.secondaryAddrs
+	if len(addrs) == 0 || sf.isBalanced() {
+		// balanced mode is point-to-point: single peer at the configured address
+		addrs = []uint16{sf.option.config.LinkAddress}
+	}
+	sf.secs = make(map[uint16]*secondaryState, len(addrs))
+	sf.secOrder = sf.secOrder[:0]
+	for _, a := range addrs {
+		if _, ok := sf.secs[a]; ok {
+			continue
+		}
+		sf.secs[a] = &secondaryState{addr: a, phase: phaseStatus}
+		sf.secOrder = append(sf.secOrder, a)
+	}
+	sf.pollIdx = 0
+}
+
+// defaultAddr returns the link address used by Send and the command wrappers.
+func (sf *Client) defaultAddr() uint16 {
+	if len(sf.option.secondaryAddrs) > 0 && !sf.isBalanced() {
+		return sf.option.secondaryAddrs[0]
+	}
+	return sf.option.config.LinkAddress
+}
+
+// updateLinkActive refreshes the aggregated link status flag.
+func (sf *Client) updateLinkActive() {
+	for _, a := range sf.secOrder {
+		if sf.secs[a].phase == phaseActive {
+			atomic.StoreUint32(&sf.linkStatus, linkStateActive)
+			return
+		}
+	}
+	atomic.StoreUint32(&sf.linkStatus, linkStateReset)
+}
+
 // runProtocol manages the communication loops and state machine for an active connection.
 // Returns an error if the connection fails or the protocol encounters a fatal error.
 func (sf *Client) runProtocol() error {
 	sf.Debug("runProtocol started")
-	sf.linkStatus = linkStateReset // Start in reset state
-	sf.fcbState = false            // Initial FCB state
+	atomic.StoreUint32(&sf.linkStatus, linkStateReset)
+	sf.initSecondaries()
+	sf.lastSent = nil
+	sf.retryCount = 0
+	sf.fcbExpected = true
 
 	// Clear any pending send queue from a previous connection
 	sf.sendQueueMutex.Lock()
 	if len(sf.sendQueue) > 0 {
 		sf.Warn("Clearing %d unsent ASDUs from send queue due to new connection/protocol start.", len(sf.sendQueue))
-		sf.sendQueue = make([]*asdu.ASDU, 0, sf.option.config.MaxSendQueueSize)
+		sf.sendQueue = sf.sendQueue[:0]
 	}
 	sf.sendQueueMutex.Unlock()
+
+	// Drain channel leftovers from a previous connection
+drain:
+	for {
+		select {
+		case <-sf.rcvFrame:
+		case <-sf.sendFrame:
+		case <-sf.rcvASDU:
+		case <-sf.linkReq:
+		default:
+			break drain
+		}
+	}
 
 	sf.onConnectCalled = false // Reset flag for this connection attempt
 	// Start communication loops
@@ -282,398 +379,365 @@ func (sf *Client) runProtocol() error {
 	go sf.frameSendLoop()
 	go sf.handlerLoop()
 
-	// --- CS101 State Machine ---
-	sf.lastRecvTime = time.Now() // Initialize last receive time
-
 	// Initialize Timers
 	sf.t1Timer = time.NewTimer(sf.option.config.TimeoutResponseT1)
-	if !sf.t1Timer.Stop() { // Stop initially, start when needed
-		<-sf.t1Timer.C
-	}
-	sf.t3Timer = time.NewTimer(sf.option.config.TimeoutTestT3) // Idle timer, starts running
-
-	sf.timerTrySend = time.NewTimer(sf.option.config.TimeoutSendLinkMsg * time.Millisecond)
+	stopTimer(sf.t1Timer) // started when a confirmed frame is sent
+	sf.t3Timer = time.NewTimer(sf.option.config.TimeoutTestT3)
+	sf.timerTrySend = time.NewTimer(sf.option.config.TimeoutSendLinkMsg)
 
 	defer sf.t1Timer.Stop()
 	defer sf.t3Timer.Stop()
 	defer sf.timerTrySend.Stop()
 
-	// Send Request Link Status command
-	if err := sf.SendRequestLinkStatus(); err != nil {
-		sf.Error("Failed to send initial Request Link Status: %v", err)
-		return err // Connection likely lost
-	}
-
 	for {
-		// Reset T3 timer whenever we are active (sending or expecting response)
-		// or after receiving something. Done implicitly by resetting below.
-
 		select {
 		case <-sf.connCtx.Done(): // Connection context cancelled
 			sf.Debug("Connection context done, stopping protocol run.")
 			sf.wg.Wait() // Wait for loops to finish
 			return sf.connCtx.Err()
 
-		case <-sf.timerTrySend.C: // Try to send a frame if there is one in the queue
-			if !sf.IsLinkActive() {
-				sf.timerTrySend.Reset(5 * sf.option.config.TimeoutSendLinkMsg)
-				continue
+		case <-sf.timerTrySend.C: // Link maintenance / poll / queued sends
+			sf.tick()
+			sf.timerTrySend.Reset(sf.option.config.TimeoutSendLinkMsg)
+
+		case fun := <-sf.linkReq: // manual link-layer request from the user API
+			if sf.lastSent != nil {
+				sf.Debug("Manual link request 0x%02X dropped: link busy", fun)
+				break
 			}
-			if len(sf.sendQueue) == 0 { // if nothing to send, request data from secondary station.
-				sf.SendReqDataClass2()
+			sec := sf.secs[sf.defaultAddr()]
+			if sec == nil {
+				break
 			}
-			sf.trySendNextFromQueue()
-			sf.timerTrySend.Reset(sf.option.config.TimeoutSendLinkMsg * time.Millisecond)
+			switch fun {
+			case PrimFcResetLink:
+				sf.sendResetLink(sec)
+			case PrimFcReqStatus:
+				sf.sendRequestLinkStatus(sec)
+			case PrimFcReqData2:
+				if sec.phase == phaseActive && !sf.isBalanced() {
+					sf.sendReqData(sec, PrimFcReqData2)
+				}
+			}
 
 		case <-sf.t1Timer.C: // T1 Timeout: No response received for confirmed message
-			sf.Warn("T1 timeout waiting for response.")
-			// Timer already fired, no need to Stop/Drain
-			if sf.lastSentConfFrame != nil {
-				if sf.retryCount < 1 { // Allow one retry using T2 logic (T2 < T1)
-					sf.retryCount++
-					sf.Warn("Retrying last confirmed frame (Retry %d)", sf.retryCount)
-					// Resend the exact same frame (same FCB)
-					err := sf.sendFrameToChan(sf.lastSentConfFrame)
-					if err != nil {
-						sf.Error("Failed to resend frame on T1 retry: %v", err)
-						return err // Connection likely lost
-					}
-					sf.lastSentConfTime = time.Now()
-					sf.t1Timer.Reset(sf.option.config.TimeoutRepeatT2) // Use T2 for retry timeout
-				} else {
-					sf.Error("T1 timeout after retry. Assuming link failure.")
-					return ErrTimeoutT1 // Return specific timeout error
-				}
-			} else {
+			if sf.lastSent == nil {
 				sf.Warn("T1 fired but no outstanding frame found.")
+				break
+			}
+			if sf.retryCount < 1 {
+				sf.retryCount++
+				sf.Warn("T1 timeout, retrying last confirmed frame (Retry %d)", sf.retryCount)
+				// Resend the exact same frame (same FCB)
+				if err := sf.sendFrameToChan(sf.lastSent.frame); err != nil {
+					sf.Error("Failed to resend frame on T1 retry: %v", err)
+					return err // Connection likely lost
+				}
+				sf.t1Timer.Reset(sf.option.config.TimeoutRepeatT2) // Use T2 for retry timeout
+			} else {
+				sec := sf.secs[sf.lastSent.addr]
+				sf.Error("T1 timeout after retry for station %d. Marking link inactive.", sf.lastSent.addr)
+				sf.lastSent = nil
+				sf.retryCount = 0
+				if sec != nil {
+					sec.phase = phaseStatus
+					sec.wantClass1 = false
+				}
+				sf.updateLinkActive()
+				// Point-to-point (single secondary or balanced): treat total
+				// loss of the peer as a connection failure so the manager can
+				// reconnect. In multi-drop keep serving the other stations.
+				if len(sf.secOrder) == 1 {
+					return ErrTimeoutT1
+				}
 			}
 
 		case <-sf.t3Timer.C: // T3 Timeout: Idle period expired
 			sf.Debug("T3 idle timeout expired.")
-			// Timer already fired, no need to Stop/Drain
-			// Send Test Link Frame if link is active and not waiting for confirmation
-			if sf.IsLinkActive() && sf.lastSentConfFrame == nil {
-				if err := sf.sendTestLink(); err != nil {
-					sf.Error("Failed to send Test Link frame on T3 timeout: %v", err)
-					return err // Connection likely lost
+			if sf.lastSent == nil {
+				if sec := sf.firstActiveSecondary(); sec != nil {
+					sf.sendTestLink(sec)
 				}
-				// Timer T1 started within sendTestLink
 			} else {
-				sf.Debug("Skipping Test Link send (Link inactive or waiting for confirm)")
-				// Reset T3 to try again later if still idle
-				sf.t3Timer.Reset(sf.option.config.TimeoutTestT3)
+				sf.Debug("Skipping Test Link send (link busy)")
 			}
+			sf.t3Timer.Reset(sf.option.config.TimeoutTestT3)
 
 		case frame := <-sf.rcvFrame:
-			sf.lastRecvTime = time.Now() // Update last receive time
 			if frame.Start == SingleCharAck {
 				sf.Debug("Received Single Char ACK")
 			} else {
 				sf.Debug("Received Frame: Start=0x%02X, Ctrl=%s, LinkAddr=%X", frame.Start, frame.GetControlField(), frame.LinkAddr)
 			}
 
-			// Stop T1 timer if we were waiting for a response and received one
-			// (handleIncomingFrame will decide if it's the correct response)
-			if sf.lastSentConfFrame != nil {
-				if !sf.t1Timer.Stop() {
-					// Drain channel if Stop returned false before Reset
-					select {
-					case <-sf.t1Timer.C:
-					default:
-					}
-				}
-			}
 			// Reset T3 timer as we received something
-			if !sf.t3Timer.Stop() {
-				select {
-				case <-sf.t3Timer.C:
-				default:
-				}
-			}
-			sf.timerTrySend.Reset(sf.option.config.TimeoutSendLinkMsg)
-			if !sf.timerTrySend.Stop() {
-				select {
-				case <-sf.timerTrySend.C:
-				default:
-				}
-			}
-			sf.timerTrySend.Reset(sf.option.config.TimeoutSendLinkMsg)
+			stopTimer(sf.t3Timer)
+			sf.t3Timer.Reset(sf.option.config.TimeoutTestT3)
 
-			err := sf.handleIncomingFrame(frame)
-			if err != nil {
+			if err := sf.handleIncomingFrame(frame); err != nil {
 				sf.Error("Error handling incoming frame: %v", err)
-				// Decide if error is fatal
-				// return err // Example: return on fatal error
+			}
+			// The handler clears lastSent when the outstanding transaction
+			// completed; stop the response timer in that case.
+			if sf.lastSent == nil {
+				stopTimer(sf.t1Timer)
 			}
 
 			// Call onConnect callback upon receiving the first frame for this connection
 			if !sf.onConnectCalled {
 				sf.Debug("First frame received, calling onConnect handler.")
-				sf.onConnect(sf)
 				sf.onConnectCalled = true
-				// Send initial Reset Link command
-				if err := sf.SendResetLink(); err != nil {
-					sf.Error("Failed to send initial Reset Link: %v", err)
-				}
+				sf.onConnect(sf)
 			}
-			//else {
-			//	ctrl := frame.GetControlField()
-			//	if !ctrl.ACD && !ctrl.PRM { // Message from Secondary Station
-			//		// sf.SendReqDataClass2() // Request class 2 data if ACD is not set
-			//	}
-			//}
 		}
 	}
 }
 
+// tick drives the link when it is free: first queued user data, then link
+// initialization and class polling (unbalanced), round-robin over stations.
+func (sf *Client) tick() {
+	if sf.lastSent != nil { // busy, T1 governs
+		return
+	}
+	// queued user data to any active station goes first
+	if sf.trySendNextFromQueue() {
+		return
+	}
+	n := len(sf.secOrder)
+	for i := 0; i < n; i++ {
+		sec := sf.secs[sf.secOrder[sf.pollIdx]]
+		sf.pollIdx = (sf.pollIdx + 1) % n
+		switch sec.phase {
+		case phaseStatus:
+			sf.sendRequestLinkStatus(sec)
+			return
+		case phaseReset:
+			sf.sendResetLink(sec)
+			return
+		case phaseActive:
+			if sf.isBalanced() {
+				// no polling in balanced mode; peer transmits spontaneously
+				continue
+			}
+			if sec.wantClass1 {
+				sf.sendReqData(sec, PrimFcReqData1)
+			} else {
+				sf.sendReqData(sec, PrimFcReqData2)
+			}
+			return
+		}
+	}
+}
+
+// firstActiveSecondary returns any station with an active link, or nil.
+func (sf *Client) firstActiveSecondary() *secondaryState {
+	for _, a := range sf.secOrder {
+		if sf.secs[a].phase == phaseActive {
+			return sf.secs[a]
+		}
+	}
+	return nil
+}
+
+// confirmPositive completes the outstanding transaction positively:
+// toggles the station FCB (if the sent frame had FCV) and advances the
+// link initialization phase. addrValid is false for E5 single char acks,
+// which carry no link address.
+func (sf *Client) confirmPositive(addr uint16, addrValid bool) {
+	p := sf.lastSent
+	if p == nil {
+		sf.Warn("Received confirm but no confirmed frame outstanding.")
+		return
+	}
+	if addrValid && p.addr != addr {
+		sf.Warn("Received confirm from station %d while waiting for station %d; ignored.", addr, p.addr)
+		return
+	}
+	sec := sf.secs[p.addr]
+	if sec != nil {
+		if p.ctrl.FCV {
+			sec.fcb = !p.ctrl.FCB // toggle only after positive confirm
+		}
+		switch p.ctrl.Fun {
+		case PrimFcResetLink:
+			sf.Debug("Link Reset confirmed by station %d. Link active.", p.addr)
+			sec.phase = phaseActive
+			sec.fcb = true // first FCV frame after reset carries FCB=1
+			sf.updateLinkActive()
+		case PrimFcReqStatus:
+			if sec.phase == phaseStatus {
+				sec.phase = phaseReset
+			}
+		case PrimFcReqData1:
+			sec.wantClass1 = false
+		}
+	}
+	sf.lastSent = nil
+	sf.retryCount = 0
+}
+
+// failTransaction aborts the outstanding transaction without toggling FCB
+// and downgrades the station link phase.
+func (sf *Client) failTransaction(addr uint16) {
+	p := sf.lastSent
+	if p == nil || p.addr != addr {
+		return
+	}
+	if sec := sf.secs[p.addr]; sec != nil {
+		sec.phase = phaseStatus
+		sec.wantClass1 = false
+	}
+	sf.lastSent = nil
+	sf.retryCount = 0
+	sf.updateLinkActive()
+}
+
 // handleIncomingFrame processes a parsed frame from the receive loop.
 func (sf *Client) handleIncomingFrame(frame *Frame) error {
-	// Validate Link Address if configured and non-zero size
-	if sf.option.config.LinkAddrSize > 0 && frame.Start != SingleCharAck {
-		receivedAddr := frame.GetLinkAddress()
-		expectedAddr := sf.option.config.LinkAddress
-		// Check against configured address and broadcast address (if applicable)
-		// Assuming 0xFFFF is broadcast for 2-byte address, 0xFF for 1-byte
-		isBroadcast := (sf.option.config.LinkAddrSize == 1 && receivedAddr == 0xFF) ||
-			(sf.option.config.LinkAddrSize == 2 && receivedAddr == 0xFFFF)
+	// Single character ACK carries no address or control field.
+	if frame.Start == SingleCharAck {
+		sf.confirmPositive(0, false)
+		return nil
+	}
 
-		if receivedAddr != expectedAddr && !isBroadcast {
-			sf.Warn("Ignoring frame with unexpected link address %d (expected %d)", receivedAddr, expectedAddr)
-			return nil // Ignore frame intended for other stations
-		}
+	receivedAddr := frame.GetLinkAddress()
+	sec := sf.secs[receivedAddr]
+	if sf.option.config.LinkAddrSize > 0 && sec == nil {
+		sf.Warn("Ignoring frame with unexpected link address %d", receivedAddr)
+		return nil // Ignore frames from unknown stations
 	}
 
 	ctrl := frame.GetControlField()
 
-	if ctrl.DFC && frame.Start != SingleCharAck {
-		sf.Warn("Received frame with Data Flow Control active (DFC=1).")
-		// Application layer might need to pause sending based on DFC state.
+	if ctrl.PRM {
+		// A frame from a primary station: only meaningful in balanced mode,
+		// where the peer also acts as a primary.
+		if !sf.isBalanced() {
+			sf.Warn("Received unexpected frame with PRM=1 in unbalanced mode: %s", ctrl)
+			return nil
+		}
+		return sf.handlePeerPrimaryFrame(frame, ctrl, receivedAddr)
 	}
 
-	// Handle based on frame type and control field
+	if ctrl.DFC {
+		sf.Warn("Station %d indicates Data Flow Control active (buffer likely full).", receivedAddr)
+	}
+
 	switch frame.Start {
-	case SingleCharAck:
-		if sf.lastSentConfFrame != nil {
-			// Check if ACK corresponds to the outstanding frame type
-			lastCtrl := sf.lastSentConfFrame.GetControlField()
-			switch lastCtrl.Fun {
-			case PrimFcResetLink:
-				sf.Debug("Link Reset Confirmed by ACK. Link Active.")
-				atomic.StoreUint32(&sf.linkStatus, linkStateActive)
-				sf.fcbState = true // Initialize FCB state after ResetLink
-			case PrimFcResetUser:
-				sf.Debug("Reset User Process Confirmed by ACK.")
-				sf.fcbState = !lastCtrl.FCB // Toggle FCB state *now*
-			case PrimFcTestLink:
-				sf.Debug("Test Link Confirmed by ACK.")
-				sf.fcbState = !lastCtrl.FCB // Toggle FCB state *now*
-			case PrimFcUserDataConf:
-				sf.Debug("Confirmed User Data ACKed (FCB=%v)", lastCtrl.FCB)
-				sf.fcbState = !lastCtrl.FCB // Toggle FCB state *now*
-			case PrimFcReqAccess:
-				sf.Debug("Request Access Confirmed by ACK.")
-				sf.fcbState = !lastCtrl.FCB // Toggle FCB state *now*
-			case PrimFcReqStatus:
-				sf.Debug("Test Link Confirmed by ACK.")
-				sf.fcbState = !lastCtrl.FCB // Toggle FCB state *now*
-			case PrimFcReqData1:
-				sf.Debug("Request Data Class 1 Confirmed by ACK.")
-				sf.fcbState = !lastCtrl.FCB // Toggle FCB state *now*
-			case PrimFcReqData2:
-				sf.Debug("Request Data Class 2 Confirmed by ACK.")
-				sf.fcbState = !lastCtrl.FCB // Toggle FCB state *now*
-			default:
-				sf.Warn("Received ACK for unhandled confirmed frame type: %s", lastCtrl)
-				sf.fcbState = !lastCtrl.FCB // Toggle FCB state *now*
-			}
-
-			sf.lastSentConfFrame = nil // Clear outstanding frame
-			sf.retryCount = 0
-			// T1 timer was already stopped before calling handleIncomingFrame
-
-			if lastCtrl.Fun == PrimFcResetLink /*&& !ctrl.ACD */ {
-				sf.SendReqDataClass2() // Send ReqDataClass2 after ResetLink ACK
-				ctrl.ACD = false       // Set ACD to false after sending ReqDataClass2
-			}
-		} else {
-			// Unsolicited ACK?
-			sf.Warn("Received ACK but no confirmed frame outstanding.")
-		}
-
 	case StartFixed:
-		// Handle fixed-length frames (ACK, NACK, Link Status Resp)
-
-		if ctrl.PRM { // Message from Primary Station
-			sf.Warn("Received unexpected fixed-length frame from primary: %s", ctrl)
-			return nil // Ignore unexpected frames from primary
-		}
-		sf.Debug("Received ACK")
-
 		switch ctrl.Fun {
-		case SecFcConfACK:
+		case SecFcConfACK: // positive acknowledge
+			sf.confirmPositive(receivedAddr, true)
 
-			if sf.lastSentConfFrame != nil {
-				// Check if ACK corresponds to the outstanding frame type
-				lastCtrl := sf.lastSentConfFrame.GetControlField()
-				switch lastCtrl.Fun {
-				case PrimFcResetLink:
-					sf.Debug("Link Reset Confirmed by ACK. Link Active.")
-					atomic.StoreUint32(&sf.linkStatus, linkStateActive)
-					sf.fcbState = true // Initialize FCB state after ResetLink
-				case PrimFcResetUser:
-					sf.Debug("Reset User Process Confirmed by ACK.")
-					sf.fcbState = !lastCtrl.FCB // Toggle FCB state *now*
-				case PrimFcTestLink:
-					sf.Debug("Test Link Confirmed by ACK.")
-					sf.fcbState = !lastCtrl.FCB // Toggle FCB state *now*
-				case PrimFcUserDataConf:
-					sf.Debug("Confirmed User Data ACKed (FCB=%v)", lastCtrl.FCB)
-					sf.fcbState = !lastCtrl.FCB // Toggle FCB state *now*
-				case PrimFcReqAccess:
-					sf.Debug("Request Access Confirmed by ACK.")
-					sf.fcbState = !lastCtrl.FCB // Toggle FCB state *now*
-				case PrimFcReqStatus:
-					sf.Debug("Test Link Confirmed by ACK.")
-					sf.fcbState = !lastCtrl.FCB // Toggle FCB state *now*
-				case PrimFcReqData1:
-					sf.Debug("Request Data Class 1 Confirmed by ACK.")
-					sf.fcbState = !lastCtrl.FCB // Toggle FCB state *now*
-				case PrimFcReqData2:
-					sf.Debug("Request Data Class 2 Confirmed by ACK.")
-					sf.fcbState = !lastCtrl.FCB // Toggle FCB state *now*
-				default:
-					sf.Warn("Received ACK for unhandled confirmed frame type: %s", lastCtrl)
-					sf.fcbState = !lastCtrl.FCB // Toggle FCB state *now*
-				}
+		case SecFcConfNACK: // link busy — keep outstanding, T1/T2 will retry
+			sf.Warn("Received NACK (link busy) from station %d.", receivedAddr)
 
-				sf.lastSentConfFrame = nil // Clear outstanding frame
-				sf.retryCount = 0
-				// T1 timer was already stopped before calling handleIncomingFrame
+		case SecFcUserDataNoRep: // NACK: requested data not available
+			sf.Debug("Station %d: requested data not available.", receivedAddr)
+			sf.confirmPositive(receivedAddr, true)
 
-				if lastCtrl.Fun == PrimFcResetLink /*&& !ctrl.ACD */ {
-					sf.SendReqDataClass2() // Send ReqDataClass2 after ResetLink ACK
-					ctrl.ACD = false       // Set ACD to false after sending ReqDataClass2
-				}
-			} else {
-				// Unsolicited ACK?
-				sf.Warn("Received ACK but no confirmed frame outstanding.")
-			}
+		case SecFcRespStatus: // status of link
+			sf.Debug("Received Link Status from station %d (DFC=%v)", receivedAddr, ctrl.DFC)
+			sf.confirmPositive(receivedAddr, true)
 
-		case SecFcConfNACK:
-			sf.Warn("Received NACK (Link Busy or Error)")
-			if sf.lastSentConfFrame != nil {
-				sf.Warn("NACK received for outstanding frame (Fun=%d). Retrying may occur on T1.", sf.lastSentConfFrame.GetControlField().Fun)
-				// Don't clear outstanding frame here. Let T1 handle retry/failure.
-				// Reset retry count as NACK is a valid (negative) response.
-				sf.retryCount = 0
-				// T1 timer was already stopped before calling handleIncomingFrame
-			} else {
-				sf.Warn("Received NACK but no confirmed frame outstanding.")
-			}
-		case SecFcRespStatus: // Response to Request Status or unsolicited status
-			sf.Debug("Received Link Status Response (DFC=%v)", ctrl.DFC)
-			sf.fcbState = !sf.lastSentConfFrame.GetControlField().FCB // Toggle FCB state *now*
-			// TODO: Process link status if needed (e.g., DFC bit indicates secondary buffer full)
-			// Application layer might need to pause sending based on DFC state.
-			// For now, just log the DFC state.
-			if ctrl.DFC {
-				sf.Warn("Secondary station indicates Data Flow Control active (buffer likely full).")
-			}
-			// If this was response to ReqStatus, clear outstanding frame
-			if sf.lastSentConfFrame != nil && sf.lastSentConfFrame.GetControlField().Fun == PrimFcReqStatus {
-				sf.Debug("Request Link Status confirmed by Response.")
-				sf.lastSentConfFrame = nil
-				sf.retryCount = 0
-				// T1 timer was already stopped before calling handleIncomingFrame
-			}
-		case SecFcRespLinkNF:
-			sf.Warn("Received NACK (Link not functioning)")
-			if sf.lastSentConfFrame != nil {
-				sf.lastSentConfFrame = nil
-				sf.retryCount = 0
-			}
-		case SecFcRespLinkNI:
-			sf.Error("Received Link Service Not Implemented")
-			if sf.lastSentConfFrame != nil {
-				sf.lastSentConfFrame = nil
-				sf.retryCount = 0
-			}
-			// TODO: Handle link failure indication (e.g., trigger reconnect or notify application)
-			// For now, log the error. The connection manager might handle reconnection.
-		case SecFcUserDataNoRep:
-			sf.Debug("NACK: requested data not available")
-			sf.fcbState = !sf.lastSentConfFrame.GetControlField().FCB // Toggle FCB state *now*
-			if sf.lastSentConfFrame != nil {
-				sf.lastSentConfFrame = nil
-				sf.retryCount = 0
-			}
+		case SecFcRespLinkNF, SecFcRespLinkNI:
+			sf.Warn("Station %d link service not functioning/implemented (FC=%d).", receivedAddr, ctrl.Fun)
+			sf.failTransaction(receivedAddr)
+
 		default:
-			sf.Warn("Received unhandled fixed-length frame from secondary: %s", ctrl)
+			sf.Warn("Received unhandled fixed-length frame from station %d: %s", receivedAddr, ctrl)
 		}
 
 	case StartVariable:
-		// Handle variable-length frames (User Data, Request Responses)
-		if !ctrl.PRM { // Message from Secondary Station
-			switch ctrl.Fun {
-			case SecFcUserDataConf: // Confirmed User Data from Secondary
-				sf.Debug("Received Confirmed User Data from Secondary")
-				sf.fcbState = !sf.lastSentConfFrame.GetControlField().FCB // Toggle FCB state *now*
-				if sf.lastSentConfFrame != nil {
-					sf.lastSentConfFrame = nil
-					sf.retryCount = 0
-				}
-				// Decode ASDU
-				asdu := frame.GetASDU(&sf.option.params)
-				if asdu != nil {
-					sf.rcvASDU <- asdu // Send to handler loop
-				} else {
-					sf.Warn("Failed to decode ASDU from variable frame")
-				}
-			case SecFcRespStatus: // Response containing requested data (Class 1/2) or Link Status
-				sf.Debug("Received Response Status/Data from Secondary")
-				sf.fcbState = !sf.lastSentConfFrame.GetControlField().FCB // Toggle FCB state *now*
-				// If this was response to ReqData1/2, clear outstanding frame
-				if sf.lastSentConfFrame != nil &&
-					(sf.lastSentConfFrame.GetControlField().Fun == PrimFcReqData1 ||
-						sf.lastSentConfFrame.GetControlField().Fun == PrimFcReqData2) {
-					sf.Debug("Request Data confirmed by Response.")
-					sf.lastSentConfFrame = nil
-					sf.retryCount = 0
-					// T1 timer was already stopped before calling handleIncomingFrame
-				}
-				// Decode ASDU if present (could be data or just status)
-				asdu := frame.GetASDU(&sf.option.params)
-				if asdu != nil {
-					sf.rcvASDU <- asdu
-				} else {
-					// This might be expected if it's just a status response without ASDU
-					// sf.Warn("Failed to decode ASDU from variable frame")
-				}
-			case SecFcRespLinkNF: // NACK - Data Not Available (for Class 1/2 requests)
-				sf.Warn("Received Data Not Available NACK")
-				sf.fcbState = !sf.lastSentConfFrame.GetControlField().FCB // Toggle FCB state *now*
-				// If this was response to ReqData1/2, clear outstanding frame
-				if sf.lastSentConfFrame != nil &&
-					(sf.lastSentConfFrame.GetControlField().Fun == PrimFcReqData1 ||
-						sf.lastSentConfFrame.GetControlField().Fun == PrimFcReqData2) {
-					sf.lastSentConfFrame = nil
-					sf.retryCount = 0
-					// T1 timer was already stopped before calling handleIncomingFrame
-				}
-			default:
-				sf.Warn("Received unhandled variable-length frame from secondary: %s", ctrl)
+		switch ctrl.Fun {
+		case SecFcUserDataConf, SecFcRespStatus: // responded user data
+			sf.Debug("Received user data from station %d", receivedAddr)
+			sf.confirmPositive(receivedAddr, true)
+			if a := frame.GetASDU(&sf.option.params); a != nil {
+				sf.dispatchASDU(a)
+			} else {
+				sf.Warn("Failed to decode ASDU from variable frame")
 			}
-		} else {
-			sf.Warn("Received unexpected variable-length frame from primary: %s", ctrl)
+
+		case SecFcUserDataNoRep:
+			sf.Debug("Station %d: no user data available.", receivedAddr)
+			sf.confirmPositive(receivedAddr, true)
+
+		default:
+			sf.Warn("Received unhandled variable-length frame from station %d: %s", receivedAddr, ctrl)
 		}
 	}
 
-	if ctrl.ACD {
-		// request class1 data
-		sf.sendReqDataClass1()
+	// Access demand: the station has class 1 data waiting.
+	if ctrl.ACD && sec != nil && !sf.isBalanced() {
+		sec.wantClass1 = true
+		if sf.lastSent == nil && sec.phase == phaseActive {
+			sf.sendReqData(sec, PrimFcReqData1)
+		}
 	}
 
 	return nil
+}
+
+// handlePeerPrimaryFrame services the secondary role of this station in
+// balanced mode: the remote peer acts as a primary and sends us link
+// commands and user data, which we must acknowledge.
+func (sf *Client) handlePeerPrimaryFrame(frame *Frame, ctrl ControlField, addr uint16) error {
+	// FCB duplicate detection for FCV frames from the peer.
+	if ctrl.FCV {
+		if ctrl.FCB != sf.fcbExpected {
+			sf.Warn("Peer frame with unexpected FCB: repeated frame, re-sending ACK.")
+			return sf.sendSecFixed(SecFcConfACK, addr)
+		}
+		sf.fcbExpected = !sf.fcbExpected
+	}
+
+	switch ctrl.Fun {
+	case PrimFcResetLink:
+		sf.Debug("Peer requested Reset Link.")
+		sf.fcbExpected = true // first FCV frame after reset carries FCB=1
+		return sf.sendSecFixed(SecFcConfACK, addr)
+
+	case PrimFcResetUser:
+		sf.Debug("Peer requested Reset User Process.")
+		return sf.sendSecFixed(SecFcConfACK, addr)
+
+	case PrimFcTestLink:
+		sf.Debug("Peer sent Test Link.")
+		return sf.sendSecFixed(SecFcConfACK, addr)
+
+	case PrimFcUserDataConf:
+		sf.Debug("Peer sent confirmed user data.")
+		if a := frame.GetASDU(&sf.option.params); a != nil {
+			sf.dispatchASDU(a)
+		} else {
+			sf.Warn("Failed to decode ASDU from peer user data frame")
+		}
+		return sf.sendSecFixed(SecFcConfACK, addr)
+
+	case PrimFcUserDataNoConf:
+		sf.Debug("Peer sent unconfirmed user data.")
+		if a := frame.GetASDU(&sf.option.params); a != nil {
+			sf.dispatchASDU(a)
+		}
+		return nil
+
+	case PrimFcReqStatus:
+		sf.Debug("Peer requested link status.")
+		return sf.sendSecFixed(SecFcRespStatus, addr)
+
+	default:
+		sf.Warn("Peer sent unhandled primary frame: %s", ctrl)
+		return sf.sendSecFixed(SecFcRespLinkNI, addr)
+	}
+}
+
+// dispatchASDU hands a decoded ASDU to the handler loop.
+func (sf *Client) dispatchASDU(a *asdu.ASDU) {
+	select {
+	case sf.rcvASDU <- a:
+	case <-sf.connCtx.Done():
+	}
 }
 
 // frameRecvLoop reads from the serial port and parses CS101 frames.
@@ -685,38 +749,22 @@ func (sf *Client) frameRecvLoop() {
 		sf.Debug("frameRecvLoop stopped")
 	}()
 
-	// Buffer for reading bytes
-	// A more robust implementation would use a dedicated buffered reader
-	// or state machine to handle partial reads and timeouts correctly.
-	// This is simplified.
 	for {
 		select {
 		case <-sf.connCtx.Done():
 			return
 		default:
-			// Use ParseFrame which handles reading internally (simplified version)
 			frame, err := ParseFrame(sf.port, sf.option.config.LinkAddrSize, &sf.connCtx)
 			if err != nil {
-				// Handle different error types
-				// Check for specific error strings if go.bug.st/serial provides them,
-				// otherwise, io.EOF and io.ErrClosedPipe are standard.
-				// The error "serial: port closed" is specific to tarm/serial.
-				// go.bug.st/serial might return different errors for closed ports,
-				// often syscall.EINVAL or similar on some platforms after closing.
-				// For now, we'll keep io.EOF and io.ErrClosedPipe.
-				// A common error from go.bug.st/serial on read from a closed port is often io.EOF or a system-specific error.
 				if errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe) {
-					sf.Debug("Serial port closed or EOF reached.") // Use Debug
-					return                                         // Normal closure or disconnect
+					sf.Debug("Serial port closed or EOF reached.")
+					return // Normal closure or disconnect
 				}
-				// Add more specific error checks for go.bug.st/serial if known, e.g.
-				// if se, ok := err.(*serial.PortError); ok {
-				//     // Handle serial.PortError
-				// }
 				// Checksum/framing errors might be recoverable or indicate noise
-				if errors.Is(err, ErrChecksumMismatch) || errors.Is(err, ErrInvalidStartChar) || errors.Is(err, ErrLengthMismatch) {
+				if errors.Is(err, ErrChecksumMismatch) || errors.Is(err, ErrInvalidStartChar) ||
+					errors.Is(err, ErrLengthMismatch) || errors.Is(err, ErrInvalidEndChar) ||
+					errors.Is(err, ErrFrameTooShort) || errors.Is(err, ErrFrameLenExceeded) {
 					sf.Warn("Frame parsing error: %v. Attempting to recover.", err)
-					// TODO: Implement recovery logic (e.g., flush buffer, wait)
 					continue
 				}
 				// Other errors might be more severe
@@ -799,10 +847,8 @@ func (sf *Client) callHandler(asduPack *asdu.ASDU) (err error) {
 	}()
 
 	// Call the generic handler first
-	// Pass 0 for the unused int parameter (originally clientNumber/server context)
-	if handlerErr := sf.handler.ASDUHandlerAll(asduPack, sf.clientNumber); handlerErr != nil { // Removed sf argument
+	if handlerErr := sf.handler.ASDUHandlerAll(asduPack, sf.clientNumber); handlerErr != nil {
 		sf.Warn("Error in ASDUHandlerAll: %v", handlerErr)
-		// Decide if this error should prevent specific handlers from running
 	}
 
 	// Determine specific handler based on TypeID AND CauseOfTransmission
@@ -812,49 +858,40 @@ func (sf *Client) callHandler(asduPack *asdu.ASDU) (err error) {
 	switch {
 	// Interrogation Responses
 	case (cause == asdu.InterrogatedByStation || (cause >= asdu.InterrogatedByGroup1 && cause <= asdu.InterrogatedByGroup16)):
-		// Check if typeID is an expected response type (M_ types)
-		// This check can be more specific if needed
 		if typeID >= asdu.M_SP_NA_1 && typeID <= asdu.M_EP_TF_1 {
 			err = sf.handler.InterrogationHandler(asduPack)
 		} else {
 			sf.Warn("Received unexpected TypeID (%s) for Interrogation COT (%s)", typeID, cause)
-			err = sf.handler.ASDUHandler(asduPack, sf.clientNumber) // Removed sf argument // Fallback to generic
+			err = sf.handler.ASDUHandler(asduPack, sf.clientNumber) // Fallback to generic
 		}
 
 	// Counter Interrogation Responses
 	case (cause == asdu.RequestByGeneralCounter || (cause >= asdu.RequestByGroup1Counter && cause <= asdu.RequestByGroup4Counter)):
 		if typeID == asdu.M_IT_NA_1 || typeID == asdu.M_IT_TA_1 || typeID == asdu.M_IT_TB_1 {
-			err = sf.handler.CounterInterrogationHandler(asduPack) // Removed sf argument
+			err = sf.handler.CounterInterrogationHandler(asduPack)
 		} else {
 			sf.Warn("Received unexpected TypeID (%s) for Counter Interrogation COT (%s)", typeID, cause)
-			err = sf.handler.ASDUHandler(asduPack, sf.clientNumber) // Removed sf argument // Fallback to generic
+			err = sf.handler.ASDUHandler(asduPack, sf.clientNumber) // Fallback to generic
 		}
 
 	// Activation Confirmation / Termination
 	case cause == asdu.ActivationCon || cause == asdu.ActivationTerm:
-		// Check if typeID is a command type (C_ types)
 		if typeID >= asdu.C_SC_NA_1 && typeID <= asdu.C_BO_NA_1 {
-			// Handle confirmation/termination, maybe via generic handler or specific logic
 			sf.Debug("Received Activation Confirmation/Termination: %s", asduPack.Identifier)
-			err = sf.handler.ASDUHandler(asduPack, sf.clientNumber) // Removed sf argument // Use generic for now
+			err = sf.handler.ASDUHandler(asduPack, sf.clientNumber)
 		} else {
 			sf.Warn("Received unexpected TypeID (%s) for ActivationCon/Term COT (%s)", typeID, cause)
-			err = sf.handler.ASDUHandler(asduPack, sf.clientNumber) // Removed sf argument // Fallback to generic
+			err = sf.handler.ASDUHandler(asduPack, sf.clientNumber) // Fallback to generic
 		}
 
 	// End of Initialization
 	case typeID == asdu.M_EI_NA_1 && cause == asdu.Initialized:
-		sf.Debug("Received End of Initialization from secondary station.") // Use Debug
-		// Potentially trigger interrogation or other actions
-		err = sf.handler.ASDUHandler(asduPack, sf.clientNumber) // Removed sf argument // Use generic handler for now
-
-	// --- Add handlers for other expected spontaneous data (M_ types with Spontaneous COT, etc.) ---
-	// case cause == asdu.Spontaneous && (typeID >= asdu.M_SP_NA_1 && typeID <= asdu.M_EP_TF_1):
-	//     err = sf.handler.ASDUHandler(asduPack, 0) // Removed sf argument
+		sf.Debug("Received End of Initialization from secondary station.")
+		err = sf.handler.ASDUHandler(asduPack, sf.clientNumber)
 
 	// Default to the generic handler for everything else
 	default:
-		err = sf.handler.ASDUHandler(asduPack, sf.clientNumber) // Removed sf argument
+		err = sf.handler.ASDUHandler(asduPack, sf.clientNumber)
 	}
 
 	return err
@@ -870,7 +907,7 @@ func (sf *Client) IsConnected() bool {
 	return atomic.LoadUint32(&sf.connStatus) == statusConnected
 }
 
-// IsLinkActive returns true if the link layer is considered active.
+// IsLinkActive returns true if at least one secondary station link is active.
 func (sf *Client) IsLinkActive() bool {
 	return sf.IsConnected() && atomic.LoadUint32(&sf.linkStatus) == linkStateActive
 }
@@ -878,27 +915,24 @@ func (sf *Client) IsLinkActive() bool {
 // Close disconnects the client and stops all background goroutines.
 func (sf *Client) Close() error {
 	sf.rwMux.Lock()
-	sf.setConnectStatus(statusInitial) // Set status to initial
-	sf.lastSentConfFrame = nil         // Clear any pending confirmation
-	if sf.cancel == nil {              // Already closed or never started
+	if sf.cancel == nil { // Already closed or never started
 		sf.rwMux.Unlock()
 		return errors.New("client not running")
 	}
-	sf.Debug("Close requested.") // Use Debug
-	sf.cancel()                  // Signal connectionManager to stop
-	sf.cancel = nil              // Prevent double close
+	sf.Debug("Close requested.")
+	sf.cancel()     // Signal connectionManager to stop
+	sf.cancel = nil // Prevent double close
 	sf.rwMux.Unlock()
-	// connectionManager will handle closing the port and stopping loops
+	// connectionManager will handle closing the port and stopping loops;
+	// it resets the status to initial when it exits.
 	return nil
 }
 
 // --- CS101 Specific Actions ---
 
-// buildLinkAddress encodes the configured link address based on size.
-func (sf *Client) buildLinkAddress() []byte {
-	size := sf.option.config.LinkAddrSize
-	addr := sf.option.config.LinkAddress
-	switch size {
+// encodeLinkAddr encodes a link address for the configured address size.
+func (sf *Client) encodeLinkAddr(addr uint16) []byte {
+	switch sf.option.config.LinkAddrSize {
 	case 1:
 		return []byte{byte(addr)}
 	case 2:
@@ -910,7 +944,23 @@ func (sf *Client) buildLinkAddress() []byte {
 	}
 }
 
-// sendFrameToChan marshals and sends a frame via the send channel.
+// primControl builds a primary control field byte. In balanced mode this
+// station acts as station A and sets the DIR bit on everything it sends.
+func (sf *Client) primControl(fun byte, fcv, fcb bool) byte {
+	control := CtrlPRM | (fun & CtrlFuncMask)
+	if sf.isBalanced() {
+		control |= CtrlDIR
+	}
+	if fcv {
+		control |= CtrlFCV
+		if fcb {
+			control |= CtrlFCB
+		}
+	}
+	return control
+}
+
+// sendFrameToChan queues a frame on the send channel.
 func (sf *Client) sendFrameToChan(frame *Frame) error {
 	if !sf.IsConnected() {
 		return ErrUseClosedConnection
@@ -921,277 +971,191 @@ func (sf *Client) sendFrameToChan(frame *Frame) error {
 	case <-sf.connCtx.Done():
 		return sf.connCtx.Err()
 	default:
-		// Buffer full? Or connection closing?
-		// Consider adding a timeout or returning ErrBufferFulled
-		return ErrBufferFulled // Or a more specific error
+		return ErrBufferFulled
 	}
 }
 
-// sendAck sends a fixed-length ACK frame.
-func (sf *Client) sendAck() error {
-	// Control field for ACK (PRM=1, Function=?) - Need to define ACK function code for primary
-	// Let's assume a simple ACK function code (e.g., 0) for now. Needs verification.
-	// Control field: PRM=1, FCV=0, FCB=0, Func=0 --> 0x40
-	control := byte(CtrlPRM) // Example ACK control field
-	linkAddr := sf.buildLinkAddress()
-	ackFrame := NewFixedFrame(control, linkAddr)
-	sf.Debug("Queueing ACK frame")
-	return sf.sendFrameToChan(ackFrame)
+// sendPrimConfirmed sends a fixed-length primary frame that expects a
+// confirmation and starts the T1 response timer.
+func (sf *Client) sendPrimConfirmed(sec *secondaryState, fun byte, fcv bool) error {
+	control := sf.primControl(fun, fcv, sec.fcb)
+	frame := NewFixedFrame(control, sf.encodeLinkAddr(sec.addr))
+	err := sf.sendFrameToChan(frame)
+	if err == nil {
+		sf.lastSent = &pendingSend{frame: frame, ctrl: ParseControlField(control), addr: sec.addr}
+		sf.retryCount = 0
+		stopTimer(sf.t1Timer)
+		sf.t1Timer.Reset(sf.option.config.TimeoutResponseT1)
+	}
+	return err
 }
 
-// SendResetLink sends a Reset Link command and waits for ACK via T1.
+// sendSecFixed sends a fixed-length secondary (PRM=0) response frame.
+// Used by the balanced-mode secondary role of this station.
+func (sf *Client) sendSecFixed(fun byte, addr uint16) error {
+	control := fun & CtrlFuncMask
+	if sf.isBalanced() {
+		control |= CtrlDIR
+	}
+	return sf.sendFrameToChan(NewFixedFrame(control, sf.encodeLinkAddr(addr)))
+}
+
+// sendResetLink sends a Reset of Remote Link command (FCV=0).
+func (sf *Client) sendResetLink(sec *secondaryState) {
+	sf.Debug("Sending Reset Link command to station %d", sec.addr)
+	sec.phase = phaseReset
+	sf.updateLinkActive()
+	if err := sf.sendPrimConfirmed(sec, PrimFcResetLink, false); err != nil {
+		sf.Error("Failed to send Reset Link: %v", err)
+	}
+}
+
+// sendRequestLinkStatus sends a Request Status of Link command (FCV=0).
+func (sf *Client) sendRequestLinkStatus(sec *secondaryState) {
+	sf.Debug("Sending Request Link Status command to station %d", sec.addr)
+	if err := sf.sendPrimConfirmed(sec, PrimFcReqStatus, false); err != nil {
+		sf.Error("Failed to send Request Link Status: %v", err)
+	}
+}
+
+// sendTestLink sends a Test Function of Link command (FCV=1).
+func (sf *Client) sendTestLink(sec *secondaryState) {
+	sf.Debug("Sending Test Link command to station %d", sec.addr)
+	if err := sf.sendPrimConfirmed(sec, PrimFcTestLink, true); err != nil {
+		sf.Error("Failed to send Test Link: %v", err)
+	}
+}
+
+// sendReqData sends a Request User Data Class 1 or Class 2 command (FCV=1).
+func (sf *Client) sendReqData(sec *secondaryState, fun byte) {
+	sf.Debug("Sending Request User Data Class %d command to station %d", fun-PrimFcReqData1+1, sec.addr)
+	if err := sf.sendPrimConfirmed(sec, fun, true); err != nil {
+		sf.Error("Failed to send Request Data: %v", err)
+	}
+}
+
+// queueLinkReq forwards a manual link-layer request to the run loop, which
+// owns the link state (safe to call from any goroutine).
+func (sf *Client) queueLinkReq(fun byte) error {
+	if !sf.IsConnected() {
+		return ErrUseClosedConnection
+	}
+	select {
+	case sf.linkReq <- fun:
+		return nil
+	default:
+		return ErrBufferFulled
+	}
+}
+
+// SendResetLink requests a Reset of Remote Link to the default secondary
+// station. The command is executed by the protocol loop when the link is free.
 func (sf *Client) SendResetLink() error {
-	if sf.lastSentConfFrame != nil {
-		return errors.New("cannot send Reset Link while waiting for confirmation")
-	}
-	control := byte(CtrlPRM | PrimFcResetLink) // PRM=1, FCV=0, FCB=0, Func=0
-	linkAddr := sf.buildLinkAddress()
-	frame := NewFixedFrame(control, linkAddr)
-	sf.Debug("Sending Reset Link command")
-	atomic.StoreUint32(&sf.linkStatus, linkStateReset) // Assume link goes to reset state
-
-	err := sf.sendFrameToChan(frame)
-	if err == nil {
-		sf.lastSentConfFrame = frame // Store for confirmation/timeout
-		sf.lastSentConfTime = time.Now()
-		sf.retryCount = 0
-		// Restart T1 timer (ensure it's stopped first)
-		if !sf.t1Timer.Stop() {
-			select {
-			case <-sf.t1Timer.C:
-			default:
-			}
-		}
-		sf.t1Timer.Reset(sf.option.config.TimeoutResponseT1)
-	}
-	return err
+	return sf.queueLinkReq(PrimFcResetLink)
 }
 
-// SendRequestLinkStatus sends a Request Link Status command and waits for response via T1.
+// SendRequestLinkStatus requests a Request Status of Link to the default
+// secondary station. Executed by the protocol loop when the link is free.
 func (sf *Client) SendRequestLinkStatus() error {
-	if sf.lastSentConfFrame != nil {
-		return errors.New("cannot send Request Status while waiting for confirmation")
-	}
-	control := byte(CtrlPRM | PrimFcReqStatus) // PRM=1, FCV=0, FCB=0, Func=9
-	linkAddr := sf.buildLinkAddress()
-	frame := NewFixedFrame(control, linkAddr)
-	sf.Debug("Sending Request Link Status command")
-
-	err := sf.sendFrameToChan(frame)
-	if err == nil {
-		sf.lastSentConfFrame = frame // Store for confirmation/timeout
-		sf.lastSentConfTime = time.Now()
-		sf.retryCount = 0
-		if !sf.t1Timer.Stop() {
-			select {
-			case <-sf.t1Timer.C:
-			default:
-			}
-		}
-		sf.t1Timer.Reset(sf.option.config.TimeoutResponseT1)
-	}
-	return err
+	return sf.queueLinkReq(PrimFcReqStatus)
 }
 
-// sendTestLink sends a Test Link command and waits for ACK via T1.
-func (sf *Client) sendTestLink() error {
-	if sf.lastSentConfFrame != nil {
-		// Avoid sending while waiting for another confirmation
-		sf.Debug("Skipping Test Link send, waiting for confirmation of previous frame.")
-		return nil // Not strictly an error, but can't send now
-	}
-	control := byte(CtrlPRM | PrimFcTestLink) // PRM=1, FCV=0, FCB=0, Func=9
-	linkAddr := sf.buildLinkAddress()
-	frame := NewFixedFrame(control, linkAddr)
-	sf.Debug("Sending Test Link command")
-
-	err := sf.sendFrameToChan(frame)
-	if err == nil {
-		sf.lastSentConfFrame = frame // Store for confirmation/timeout
-		sf.lastSentConfTime = time.Now()
-		sf.retryCount = 0
-		// Restart T1 timer (ensure it's stopped first)
-		if !sf.t1Timer.Stop() {
-			select {
-			case <-sf.t1Timer.C:
-			default:
-			}
-		}
-		sf.t1Timer.Reset(sf.option.config.TimeoutResponseT1)
-	}
-	return err
-}
-
-// sendReqDataClass1 sends a Request User Data Class 1 command and waits for response via T1.
-func (sf *Client) sendReqDataClass1() error {
-	if !sf.IsLinkActive() {
-		sf.Warn("Cannot send Request Data Class 1: Link not active.")
-		return ErrNotActive
-	}
-	if sf.lastSentConfFrame != nil {
-		sf.Debug("Skipping Request Data Class 1 send, waiting for confirmation of previous frame.")
-		return errors.New("cannot send Request Data Class 1 while waiting for confirmation")
-	}
-	control := byte(CtrlPRM | PrimFcReqData1) // PRM=1, Func=10
-	control |= CtrlFCV
-	if sf.fcbState {
-		control |= CtrlFCB
-	}
-
-	linkAddr := sf.buildLinkAddress()
-	frame := NewFixedFrame(control, linkAddr)
-	sf.Debug("Sending Request User Data Class 1 command")
-
-	err := sf.sendFrameToChan(frame)
-	if err == nil {
-		sf.lastSentConfFrame = frame // Store for confirmation/timeout
-		sf.lastSentConfTime = time.Now()
-		sf.retryCount = 0
-		if !sf.t1Timer.Stop() {
-			select {
-			case <-sf.t1Timer.C:
-			default:
-			}
-		}
-		sf.t1Timer.Reset(sf.option.config.TimeoutResponseT1)
-	}
-	return err
-}
-
-// SendReqDataClass2 sends a Request User Data Class 2 command and waits for response via T1.
+// SendReqDataClass2 requests a Request User Data Class 2 poll of the default
+// secondary station. Executed by the protocol loop when the link is free.
+// Note the client polls class 1/2 data automatically in unbalanced mode.
 func (sf *Client) SendReqDataClass2() error {
-	if !sf.IsLinkActive() {
-		sf.Warn("Cannot send Request Data Class 2: Link not active.")
-		return ErrNotActive
-	}
-	if sf.lastSentConfFrame != nil {
-		sf.Debug("Skipping Request Data Class 2 send, waiting for confirmation of previous frame.")
-		return errors.New("cannot send Request Data Class 2 while waiting for confirmation")
-	}
-	control := byte(CtrlPRM | PrimFcReqData2) // PRM=1, Func=11
-	control |= CtrlFCV
-	if sf.fcbState {
-		control |= CtrlFCB
-	}
-
-	linkAddr := sf.buildLinkAddress()
-	frame := NewFixedFrame(control, linkAddr)
-	sf.Debug("Sending Request User Data Class 2 command")
-
-	err := sf.sendFrameToChan(frame)
-	if err == nil {
-		sf.lastSentConfFrame = frame // Store for confirmation/timeout
-		sf.lastSentConfTime = time.Now()
-		sf.retryCount = 0
-		if !sf.t1Timer.Stop() {
-			select {
-			case <-sf.t1Timer.C:
-			default:
-			}
-		}
-		sf.t1Timer.Reset(sf.option.config.TimeoutResponseT1)
-	}
-	return err
+	return sf.queueLinkReq(PrimFcReqData2)
 }
 
-// Send sends an ASDU as user data.
-// Handles creating the appropriate variable-length frame.
-// This function handles sending Confirmed User Data (PrimFcUserDataConf).
-func (sf *Client) _sendASDU(a *asdu.ASDU) error {
-
-	// This function is called when it's confirmed that we can send a new frame.
-	// Pre-condition: sf.lastSentConfFrame should be nil.
-	if !sf.IsLinkActive() {
+// _sendASDU sends one ASDU as confirmed user data (called by the run loop
+// only, with the link free).
+func (sf *Client) _sendASDU(out outgoingASDU) error {
+	sec := sf.secs[out.addr]
+	if sec == nil || sec.phase != phaseActive {
 		return ErrNotActive
 	}
 
-	// Marshal the ASDU
-	asduData, err := a.MarshalBinary()
+	asduData, err := out.a.MarshalBinary()
 	if err != nil {
 		return fmt.Errorf("failed to marshal ASDU: %w", err)
 	}
 
-	// Determine Control Field for User Data (Confirmed)
-	// PRM=1, FCV=1 (valid FCB), FCB=(current state), Func=3
-	control := byte(CtrlPRM | CtrlFCV | PrimFcUserDataConf)
-	if sf.fcbState {
-		control |= CtrlFCB
-	}
+	control := sf.primControl(PrimFcUserDataConf, true, sec.fcb)
+	frame := NewDataFrame(control, sf.encodeLinkAddr(sec.addr), asduData)
 
-	linkAddr := sf.buildLinkAddress()
-	frame := NewDataFrame(control, linkAddr, asduData)
-
-	sf.Debug("Sending User Data (ASDU Type: %s, FCB: %v)", a.Identifier.Type, sf.fcbState)
+	sf.Debug("Sending User Data to station %d (ASDU Type: %s, FCB: %v)", sec.addr, out.a.Identifier.Type, sec.fcb)
 
 	err = sf.sendFrameToChan(frame)
 	if err == nil {
-		sf.lastSentConfFrame = frame // Store for confirmation/timeout
-		sf.lastSentConfTime = time.Now()
+		sf.lastSent = &pendingSend{frame: frame, ctrl: ParseControlField(control), addr: sec.addr}
 		sf.retryCount = 0
-		if !sf.t1Timer.Stop() {
-			select {
-			case <-sf.t1Timer.C:
-			default:
-			}
-		}
+		stopTimer(sf.t1Timer)
 		sf.t1Timer.Reset(sf.option.config.TimeoutResponseT1)
-		// DO NOT toggle fcbState here. Toggle only after receiving ACK.
+		// FCB toggles only after the positive confirm arrives.
 	}
 	return err
 }
 
-// Send queues an ASDU for transmission.
-// If the link is free and the queue is empty, it sends immediately.
-// Otherwise, it enqueues the ASDU.
+// Send queues an ASDU for transmission to the default secondary station.
 func (sf *Client) Send(a *asdu.ASDU) error {
+	return sf.SendTo(a, sf.defaultAddr())
+}
+
+// SendTo queues an ASDU for transmission to the secondary station with the
+// given link address (unbalanced multi-drop). The protocol loop transmits it
+// as confirmed user data when that station's link is free and active.
+func (sf *Client) SendTo(a *asdu.ASDU, linkAddr uint16) error {
 	if !sf.IsConnected() { // Basic connection check
 		return ErrUseClosedConnection
 	}
-	if !sf.IsLinkActive() {
-		// It might be okay to queue even if link is not fully active yet (e.g. during reset link)
-		// but for sending, link active is a better check.
-		// For now, let's allow queueing if connected, _sendASDU will check IsLinkActive.
-		sf.Debug("Send called but link not active. ASDU will be queued: %s", a.Identifier)
-	}
 
 	sf.sendQueueMutex.Lock()
-
-	//// If link is free (no outstanding confirmed frame) AND queue is empty, send immediately.
-	// if sf.lastSentConfFrame == nil && len(sf.sendQueue) == 0 {
-	// 	sf.sendQueueMutex.Unlock()
-	// 	return sf._sendASDU(a)
-	// }
-
-	// Otherwise, enqueue the ASDU.
+	defer sf.sendQueueMutex.Unlock()
 	if len(sf.sendQueue) >= sf.option.config.MaxSendQueueSize {
-		sf.sendQueueMutex.Unlock()
 		sf.Warn("Send queue full, discarding ASDU: %s. Queue size: %d", a.Identifier, len(sf.sendQueue))
 		return ErrSendQueueFull
 	}
-
-	sf.sendQueue = append(sf.sendQueue, a)
-	sf.Debug("ASDU %s enqueued. Queue size: %d", a.Identifier, len(sf.sendQueue))
-	sf.sendQueueMutex.Unlock()
+	sf.sendQueue = append(sf.sendQueue, outgoingASDU{a: a, addr: linkAddr})
+	sf.Debug("ASDU %s enqueued for station %d. Queue size: %d", a.Identifier, linkAddr, len(sf.sendQueue))
 	return nil
 }
 
-// trySendNextFromQueue attempts to send the next ASDU from the queue if the link is free.
-func (sf *Client) trySendNextFromQueue() {
-	sf.sendQueueMutex.Lock()
-	if sf.lastSentConfFrame == nil && len(sf.sendQueue) > 0 {
-		nextASDU := sf.sendQueue[0]
-		sf.sendQueue = sf.sendQueue[1:]
-		sf.sendQueueMutex.Unlock() // Unlock before calling _sendASDU
-
-		sf.Debug("Dequeued ASDU %s for sending. Remaining queue size: %d", nextASDU.Identifier, len(sf.sendQueue))
-		if err := sf._sendASDU(nextASDU); err != nil {
-			sf.Error("Failed to send ASDU from queue (%s): %v. ASDU lost.", nextASDU.Identifier, err)
-			// Optionally, re-queue at the front or handle error more robustly.
-			// For now, it's logged and lost from the queue.
-		}
-	} else {
-		sf.sendQueueMutex.Unlock()
+// trySendNextFromQueue sends the first queued ASDU whose target station is
+// active. Entries addressed to unknown stations are dropped. Returns true
+// when a frame was handed to the send loop.
+func (sf *Client) trySendNextFromQueue() bool {
+	if sf.lastSent != nil {
+		return false
 	}
+	sf.sendQueueMutex.Lock()
+	var next outgoingASDU
+	found := false
+	for i := 0; i < len(sf.sendQueue); {
+		e := sf.sendQueue[i]
+		sec := sf.secs[e.addr]
+		if sec == nil {
+			sf.Error("Dropping queued ASDU %s: unknown station %d", e.a.Identifier, e.addr)
+			sf.sendQueue = append(sf.sendQueue[:i], sf.sendQueue[i+1:]...)
+			continue
+		}
+		if sec.phase == phaseActive {
+			next = e
+			sf.sendQueue = append(sf.sendQueue[:i], sf.sendQueue[i+1:]...)
+			found = true
+			break
+		}
+		i++ // target not active yet: keep queued, try later entries
+	}
+	sf.sendQueueMutex.Unlock()
+
+	if !found {
+		return false
+	}
+	if err := sf._sendASDU(next); err != nil {
+		sf.Error("Failed to send ASDU from queue (%s): %v. ASDU lost.", next.a.Identifier, err)
+		return false
+	}
+	return true
 }
 
 // --- ASDU Command Wrappers ---
@@ -1208,7 +1172,7 @@ func (sf *Client) InterrogationCmd(coa asdu.CauseOfTransmission, ca asdu.CommonA
 
 	// Manually construct the info object bytes: IOA + QOI
 	ioaBytes := encodeIOA(0, &sf.option.params) // IOA=0 for station interrogation
-	qoiByte := byte(qoi)                        // Correctly define qoiByte
+	qoiByte := byte(qoi)
 	infoBytes := append(ioaBytes, qoiByte)
 
 	// Construct the full raw ASDU bytes
@@ -1219,7 +1183,6 @@ func (sf *Client) InterrogationCmd(coa asdu.CauseOfTransmission, ca asdu.CommonA
 
 	// Unmarshal into the ASDU struct to populate internal fields correctly
 	if err := a.UnmarshalBinary(rawASDU); err != nil {
-		// This shouldn't fail if buildRawASDU is correct, but check anyway
 		return fmt.Errorf("failed to unmarshal locally built ASDU for InterrogationCmd: %w", err)
 	}
 
@@ -1238,7 +1201,7 @@ func (sf *Client) CounterInterrogationCmd(coa asdu.CauseOfTransmission, ca asdu.
 
 	// Manually construct the info object bytes: IOA + QCC
 	ioaBytes := encodeIOA(0, &sf.option.params) // IOA=0 for counter interrogation
-	qccByte := qcc.Value()                      // Use Value() method if available
+	qccByte := qcc.Value()
 	infoBytes := append(ioaBytes, qccByte)
 
 	// Construct the full raw ASDU bytes
@@ -1372,7 +1335,7 @@ func (sf *Client) TestCommand(coa asdu.CauseOfTransmission, ca asdu.CommonAddr) 
 
 	// Manually construct the info object bytes: IOA + Test Pattern
 	ioaBytes := encodeIOA(0, &sf.option.params) // IOA=0 for test command
-	testPattern := []byte{0xAA, 0x55}           // Standard test pattern
+	testPattern := []byte{0xAA, 0x55}           // Standard test pattern (FBP 0x55AA little endian)
 	infoBytes := append(ioaBytes, testPattern...)
 
 	// Construct the full raw ASDU bytes
@@ -1407,11 +1370,6 @@ func encodeIOA(ioa asdu.InfoObjAddr, params *asdu.Params) []byte {
 
 // buildRawASDU constructs the full byte slice for an ASDU.
 func buildRawASDU(identifier asdu.Identifier, infoBytes []byte, params *asdu.Params) ([]byte, error) {
-	// We need to temporarily assign the infoBytes to the internal field
-	// This is a hack due to the unexported field. A better solution would be
-	// to modify the asdu package to provide a way to set infoObj or marshal with it.
-	// Since we can't modify asdu package directly here, we'll construct the header manually.
-
 	headerSize := params.IdentifierSize()
 	totalSize := headerSize + len(infoBytes)
 	if totalSize > asdu.ASDUSizeMax {
@@ -1470,9 +1428,14 @@ func (sf *Client) Params() *asdu.Params {
 	return &sf.option.params
 }
 
-// UnderlyingConn is required by asdu.Connect interface, but less relevant for serial.
-// Return nil or a placeholder.
-func (sf *Client) UnderlyingConn() io.ReadWriteCloser {
+// UnderlyingConn is required by the asdu.Connect interface. A serial port is
+// not a net.Conn, so this returns nil; use Port to access the serial port.
+func (sf *Client) UnderlyingConn() net.Conn {
+	return nil
+}
+
+// Port returns the underlying serial port (nil when disconnected).
+func (sf *Client) Port() io.ReadWriteCloser {
 	return sf.port
 }
 

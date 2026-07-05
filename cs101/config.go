@@ -154,11 +154,14 @@ func (sf *Config) Valid() error {
 	if sf.TimeoutSendLinkMsg == 0 {
 		sf.TimeoutSendLinkMsg = DefaultTimeoutSendLinkMsg
 	} else if sf.TimeoutSendLinkMsg < TimeoutSendLinkMsgMin || sf.TimeoutSendLinkMsg > TimeoutSendLinkMsgMax {
-		return errors.New("timeout for sending link message out of range [1s, 48h]")
+		return errors.New("timeout for sending link message out of range [1ms, 10s]")
 	}
 
 	if sf.MaxSendQueueSize < 0 {
 		return errors.New("MaxSendQueueSize must be positive")
+	}
+	if sf.MaxSendQueueSize == 0 {
+		sf.MaxSendQueueSize = DefaultMaxSendQueueSize
 	}
 
 	// Validate Max APDU Length
