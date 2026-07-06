@@ -185,6 +185,7 @@ func ParameterActivation(c Connect, coa CauseOfTransmission, ca CommonAddr, p Pa
 
 // GetParameterNormal [P_ME_NA_1]，Get measured value parameters, scaled value information body
 func (sf *ASDU) GetParameterNormal() ParameterNormalInfo {
+	defer sf.restoreInfoObj(sf.InfoObj)
 	return ParameterNormalInfo{
 		sf.DecodeInfoObjAddr(),
 		sf.DecodeNormalize(),
@@ -194,6 +195,7 @@ func (sf *ASDU) GetParameterNormal() ParameterNormalInfo {
 
 // GetParameterScaled [P_ME_NB_1]，Get measured value parameters, normalized value information body
 func (sf *ASDU) GetParameterScaled() ParameterScaledInfo {
+	defer sf.restoreInfoObj(sf.InfoObj)
 	return ParameterScaledInfo{
 		sf.DecodeInfoObjAddr(),
 		sf.DecodeScaled(),
@@ -203,6 +205,7 @@ func (sf *ASDU) GetParameterScaled() ParameterScaledInfo {
 
 // GetParameterFloat [P_ME_NC_1]，Get measured value parameter, short floating point number information body
 func (sf *ASDU) GetParameterFloat() ParameterFloatInfo {
+	defer sf.restoreInfoObj(sf.InfoObj)
 	return ParameterFloatInfo{
 		sf.DecodeInfoObjAddr(),
 		sf.DecodeFloat32(),
@@ -212,6 +215,7 @@ func (sf *ASDU) GetParameterFloat() ParameterFloatInfo {
 
 // GetParameterActivation [P_AC_NA_1]，Get parameter activation message body
 func (sf *ASDU) GetParameterActivation() ParameterActivationInfo {
+	defer sf.restoreInfoObj(sf.InfoObj)
 	return ParameterActivationInfo{
 		sf.DecodeInfoObjAddr(),
 		QualifierOfParameterAct(sf.InfoObj[0]),

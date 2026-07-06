@@ -1126,6 +1126,7 @@ func PackedSinglePointWithSCD(c Connect, isSequence bool, coa CauseOfTransmissio
 
 // GetSinglePoint [M_SP_NA_1], [M_SP_TA_1] or [M_SP_TB_1] Obtain a collection of single-point information information bodies
 func (sf *ASDU) GetSinglePoint() []SinglePointInfo {
+	defer sf.restoreInfoObj(sf.InfoObj)
 	info := make([]SinglePointInfo, 0, sf.Variable.Number)
 	infoObjAddr := InfoObjAddr(0)
 	for i, once := 0, false; i < int(sf.Variable.Number); i++ {
@@ -1159,6 +1160,7 @@ func (sf *ASDU) GetSinglePoint() []SinglePointInfo {
 
 // GetDoublePoint [M_DP_NA_1], [M_DP_TA_1] or [M_DP_TB_1] Obtain the set of two-point information bodies
 func (sf *ASDU) GetDoublePoint() []DoublePointInfo {
+	defer sf.restoreInfoObj(sf.InfoObj)
 	info := make([]DoublePointInfo, 0, sf.Variable.Number)
 	infoObjAddr := InfoObjAddr(0)
 	for i, once := 0, false; i < int(sf.Variable.Number); i++ {
@@ -1192,6 +1194,7 @@ func (sf *ASDU) GetDoublePoint() []DoublePointInfo {
 
 // GetStepPosition [M_ST_NA_1], [M_ST_TA_1] or [M_ST_TB_1] Obtain the set of step position information
 func (sf *ASDU) GetStepPosition() []StepPositionInfo {
+	defer sf.restoreInfoObj(sf.InfoObj)
 	info := make([]StepPositionInfo, 0, sf.Variable.Number)
 	infoObjAddr := InfoObjAddr(0)
 	for i, once := 0, false; i < int(sf.Variable.Number); i++ {
@@ -1226,6 +1229,7 @@ func (sf *ASDU) GetStepPosition() []StepPositionInfo {
 
 // GetBitString32 [M_BO_NA_1], [M_BO_TA_1] or [M_BO_TB_1] Obtain the set of bit string information bodies
 func (sf *ASDU) GetBitString32() []BitString32Info {
+	defer sf.restoreInfoObj(sf.InfoObj)
 	info := make([]BitString32Info, 0, sf.Variable.Number)
 	infoObjAddr := InfoObjAddr(0)
 	for i, once := 0, false; i < int(sf.Variable.Number); i++ {
@@ -1261,6 +1265,7 @@ func (sf *ASDU) GetBitString32() []BitString32Info {
 
 // GetMeasuredValueNormal [M_ME_NA_1], [M_ME_TA_1],[ M_ME_TD_1] or [M_ME_ND_1] Obtain the measured value and normalize the value information body collection
 func (sf *ASDU) GetMeasuredValueNormal() []MeasuredValueNormalInfo {
+	defer sf.restoreInfoObj(sf.InfoObj)
 	info := make([]MeasuredValueNormalInfo, 0, sf.Variable.Number)
 	infoObjAddr := InfoObjAddr(0)
 	for i, once := 0, false; i < int(sf.Variable.Number); i++ {
@@ -1300,6 +1305,7 @@ func (sf *ASDU) GetMeasuredValueNormal() []MeasuredValueNormalInfo {
 
 // GetMeasuredValueScaled [M_ME_NB_1], [M_ME_TB_1] or [M_ME_TE_1] Obtain the measured value, the set of scaled value information body
 func (sf *ASDU) GetMeasuredValueScaled() []MeasuredValueScaledInfo {
+	defer sf.restoreInfoObj(sf.InfoObj)
 	info := make([]MeasuredValueScaledInfo, 0, sf.Variable.Number)
 	infoObjAddr := InfoObjAddr(0)
 	for i, once := 0, false; i < int(sf.Variable.Number); i++ {
@@ -1335,6 +1341,7 @@ func (sf *ASDU) GetMeasuredValueScaled() []MeasuredValueScaledInfo {
 
 // GetMeasuredValueFloat [M_ME_NC_1], [M_ME_TC_1] or [M_ME_TF_1]. Obtain the measurement value, a collection of short floating-point number information bodies
 func (sf *ASDU) GetMeasuredValueFloat() []MeasuredValueFloatInfo {
+	defer sf.restoreInfoObj(sf.InfoObj)
 	info := make([]MeasuredValueFloatInfo, 0, sf.Variable.Number)
 	infoObjAddr := InfoObjAddr(0)
 	for i, once := 0, false; i < int(sf.Variable.Number); i++ {
@@ -1369,6 +1376,7 @@ func (sf *ASDU) GetMeasuredValueFloat() []MeasuredValueFloatInfo {
 
 // GetIntegratedTotals [M_IT_NA_1], [M_IT_TA_1] or [M_IT_TB_1]. Get cumulative information body set
 func (sf *ASDU) GetIntegratedTotals() []BinaryCounterReadingInfo {
+	defer sf.restoreInfoObj(sf.InfoObj)
 	info := make([]BinaryCounterReadingInfo, 0, sf.Variable.Number)
 	infoObjAddr := InfoObjAddr(0)
 	for i, once := 0, false; i < int(sf.Variable.Number); i++ {
@@ -1401,6 +1409,7 @@ func (sf *ASDU) GetIntegratedTotals() []BinaryCounterReadingInfo {
 
 // GetEventOfProtectionEquipment [M_EP_TA_1] [M_EP_TD_1] Obtain the event information body of relay protection equipment
 func (sf *ASDU) GetEventOfProtectionEquipment() []EventOfProtectionEquipmentInfo {
+	defer sf.restoreInfoObj(sf.InfoObj)
 	info := make([]EventOfProtectionEquipmentInfo, 0, sf.Variable.Number)
 	infoObjAddr := InfoObjAddr(0)
 	for i, once := 0, false; i < int(sf.Variable.Number); i++ {
@@ -1434,6 +1443,7 @@ func (sf *ASDU) GetEventOfProtectionEquipment() []EventOfProtectionEquipmentInfo
 
 // GetPackedStartEventsOfProtectionEquipment [M_EP_TB_1] [M_EP_TE_1] Obtain the event information body of relay protection equipment
 func (sf *ASDU) GetPackedStartEventsOfProtectionEquipment() PackedStartEventsOfProtectionEquipmentInfo {
+	defer sf.restoreInfoObj(sf.InfoObj)
 	info := PackedStartEventsOfProtectionEquipmentInfo{}
 
 	if sf.Variable.IsSequence || sf.Variable.Number != 1 {
@@ -1457,6 +1467,7 @@ func (sf *ASDU) GetPackedStartEventsOfProtectionEquipment() PackedStartEventsOfP
 
 // GetPackedOutputCircuitInfo [M_EP_TC_1] [M_EP_TF_1] Obtain the group output circuit information body of relay protection equipment
 func (sf *ASDU) GetPackedOutputCircuitInfo() PackedOutputCircuitInfoInfo {
+	defer sf.restoreInfoObj(sf.InfoObj)
 	info := PackedOutputCircuitInfoInfo{}
 
 	if sf.Variable.IsSequence || sf.Variable.Number != 1 {
@@ -1480,6 +1491,7 @@ func (sf *ASDU) GetPackedOutputCircuitInfo() PackedOutputCircuitInfoInfo {
 
 // GetPackedSinglePointWithSCD [M_PS_NA_1]. Obtain grouped single point information with displacement detection
 func (sf *ASDU) GetPackedSinglePointWithSCD() []PackedSinglePointWithSCDInfo {
+	defer sf.restoreInfoObj(sf.InfoObj)
 	info := make([]PackedSinglePointWithSCDInfo, 0, sf.Variable.Number)
 	infoObjAddr := InfoObjAddr(0)
 	for i, once := 0, false; i < int(sf.Variable.Number); i++ {

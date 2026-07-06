@@ -117,6 +117,20 @@ See the [cs101 guide](docs/cs101.md) for serial configuration, unbalanced
 polling (including multi-drop with several secondary stations on one line)
 and balanced point-to-point mode.
 
+## Examples
+
+Runnable programs live under [`_examples`](_examples) (each buildable with
+`go run .` from its directory):
+
+- [`cs104_explorer`](_examples/cs104_explorer) — an interactive terminal IEC 104
+  master (Bubble Tea TUI): connect to servers, issue interrogation/clock/test/
+  reset requests, send control commands, and watch received points and a live
+  protocol log. It is a self-contained module so its UI dependencies stay out
+  of the library.
+- `cs104_server_general`, `cs104_client_general`, `cs104_server_special` — minimal
+  104 server, client, and reverse-connection server.
+- `cs101_client_general` — minimal 101 serial master.
+
 ## Implemented
 
 - All process information types in monitor direction, with and without

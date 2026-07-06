@@ -587,22 +587,22 @@ func (sf *Server) callHandler(payload handlerASDUPayload) (err error) {
 		}
 	}()
 
-	// Create a temporary ASDU struct for passing to handlers that expect it
-	// Note: This ASDU will only have the Identifier populated correctly.
-	// Handlers needing detailed info object data must parse the raw bytes.
-	tempASDU := asdu.NewASDU(&sf.params, payload.Identifier)
-
-	// Call generic handler first
-	if handlerErr := sf.handler.ASDUHandlerAll(tempASDU, 0); handlerErr != nil {
-		sf.Warn("Error in ASDUHandlerAll: %v", handlerErr)
-	}
-
 	// Calculate offset to information objects within the raw data
 	ioOffset := sf.params.IdentifierSize()
 	if ioOffset > len(payload.RawData) {
 		return fmt.Errorf("invalid ASDU raw data: length %d less than identifier size %d", len(payload.RawData), ioOffset)
 	}
 	infoObjectBytes := payload.RawData[ioOffset:]
+
+	// Reconstruct the ASDU (identifier + information objects) for the
+	// handlers, so the Get* decoders and SendReplyMirror work on it.
+	tempASDU := asdu.NewASDU(&sf.params, payload.Identifier)
+	tempASDU.InfoObj = append(tempASDU.InfoObj, infoObjectBytes...)
+
+	// Call generic handler first
+	if handlerErr := sf.handler.ASDUHandlerAll(tempASDU, 0); handlerErr != nil {
+		sf.Warn("Error in ASDUHandlerAll: %v", handlerErr)
+	}
 
 	// Call specific handlers based on TypeID
 	switch payload.Identifier.Type {

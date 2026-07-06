@@ -388,6 +388,7 @@ func BitsString32Cmd(c Connect, typeID TypeID, coa CauseOfTransmission, commonAd
 
 // GetSingleCmd [C_SC_NA_1] or [C_SC_TA_1] Get the message body of a single command
 func (sf *ASDU) GetSingleCmd() SingleCommandInfo {
+	defer sf.restoreInfoObj(sf.InfoObj)
 	var s SingleCommandInfo
 
 	s.Ioa = sf.DecodeInfoObjAddr()
@@ -408,6 +409,7 @@ func (sf *ASDU) GetSingleCmd() SingleCommandInfo {
 
 // GetDoubleCmd [C_DC_NA_1] or [C_DC_TA_1] Get the dual command information body
 func (sf *ASDU) GetDoubleCmd() DoubleCommandInfo {
+	defer sf.restoreInfoObj(sf.InfoObj)
 	var cmd DoubleCommandInfo
 
 	cmd.Ioa = sf.DecodeInfoObjAddr()
@@ -428,6 +430,7 @@ func (sf *ASDU) GetDoubleCmd() DoubleCommandInfo {
 
 // GetStepCmd [C_RC_NA_1] or [C_RC_TA_1] Get step adjustment command information body
 func (sf *ASDU) GetStepCmd() StepCommandInfo {
+	defer sf.restoreInfoObj(sf.InfoObj)
 	var cmd StepCommandInfo
 
 	cmd.Ioa = sf.DecodeInfoObjAddr()
@@ -448,6 +451,7 @@ func (sf *ASDU) GetStepCmd() StepCommandInfo {
 
 // GetSetpointNormalCmd [C_SE_NA_1] or [C_SE_TA_1] Get setting command, normalize value information body
 func (sf *ASDU) GetSetpointNormalCmd() SetpointCommandNormalInfo {
+	defer sf.restoreInfoObj(sf.InfoObj)
 	var cmd SetpointCommandNormalInfo
 
 	cmd.Ioa = sf.DecodeInfoObjAddr()
@@ -467,6 +471,7 @@ func (sf *ASDU) GetSetpointNormalCmd() SetpointCommandNormalInfo {
 
 // GetSetpointCmdScaled [C_SE_NB_1] or [C_SE_TB_1] Get setting command, scaled value information body
 func (sf *ASDU) GetSetpointCmdScaled() SetpointCommandScaledInfo {
+	defer sf.restoreInfoObj(sf.InfoObj)
 	var cmd SetpointCommandScaledInfo
 
 	cmd.Ioa = sf.DecodeInfoObjAddr()
@@ -486,6 +491,7 @@ func (sf *ASDU) GetSetpointCmdScaled() SetpointCommandScaledInfo {
 
 // GetSetpointFloatCmd [C_SE_NC_1] or [C_SE_TC_1] Get setting command, short floating point number information body
 func (sf *ASDU) GetSetpointFloatCmd() SetpointCommandFloatInfo {
+	defer sf.restoreInfoObj(sf.InfoObj)
 	var cmd SetpointCommandFloatInfo
 
 	cmd.Ioa = sf.DecodeInfoObjAddr()
@@ -505,6 +511,7 @@ func (sf *ASDU) GetSetpointFloatCmd() SetpointCommandFloatInfo {
 
 // GetBitsString32Cmd [C_BO_NA_1] or [C_BO_TA_1] Get bit string command message body
 func (sf *ASDU) GetBitsString32Cmd() BitsString32CommandInfo {
+	defer sf.restoreInfoObj(sf.InfoObj)
 	var cmd BitsString32CommandInfo
 
 	cmd.Ioa = sf.DecodeInfoObjAddr()

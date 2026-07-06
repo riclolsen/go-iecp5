@@ -34,5 +34,6 @@ func EndOfInitialization(c Connect, coa CauseOfTransmission, ca CommonAddr, ioa 
 
 // GetEndOfInitialization get GetEndOfInitialization for asdu when the identification [M_EI_NA_1]
 func (sf *ASDU) GetEndOfInitialization() (InfoObjAddr, CauseOfInitial) {
+	defer sf.restoreInfoObj(sf.InfoObj)
 	return sf.DecodeInfoObjAddr(), ParseCauseOfInitial(sf.InfoObj[0])
 }

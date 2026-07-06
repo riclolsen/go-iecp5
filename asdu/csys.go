@@ -261,41 +261,49 @@ func TestCommandCP56Time2a(c Connect, coa CauseOfTransmission, ca CommonAddr, t 
 
 // GetInterrogationCmd [C_IC_NA_1] Get the total call information body (information object address, call qualifier)
 func (sf *ASDU) GetInterrogationCmd() (InfoObjAddr, QualifierOfInterrogation) {
+	defer sf.restoreInfoObj(sf.InfoObj)
 	return sf.DecodeInfoObjAddr(), QualifierOfInterrogation(sf.InfoObj[0])
 }
 
 // GetCounterInterrogationCmd [C_CI_NA_1] Obtain the metered call information body (information object address, metered call qualifier)
 func (sf *ASDU) GetCounterInterrogationCmd() (InfoObjAddr, QualifierCountCall) {
+	defer sf.restoreInfoObj(sf.InfoObj)
 	return sf.DecodeInfoObjAddr(), ParseQualifierCountCall(sf.InfoObj[0])
 }
 
 // GetReadCmd [C_RD_NA_1] Get the address of the read command information
 func (sf *ASDU) GetReadCmd() InfoObjAddr {
+	defer sf.restoreInfoObj(sf.InfoObj)
 	return sf.DecodeInfoObjAddr()
 }
 
 // GetClockSynchronizationCmd [C_CS_NA_1] Obtain clock synchronization command information body (information object address, time)
 func (sf *ASDU) GetClockSynchronizationCmd() (InfoObjAddr, time.Time) {
+	defer sf.restoreInfoObj(sf.InfoObj)
 
 	return sf.DecodeInfoObjAddr(), sf.DecodeCP56Time2a()
 }
 
 // GetTestCommand [C_TS_NA_1], get the test command information body (information object address, whether it is a test word)
 func (sf *ASDU) GetTestCommand() (InfoObjAddr, bool) {
+	defer sf.restoreInfoObj(sf.InfoObj)
 	return sf.DecodeInfoObjAddr(), sf.DecodeUint16() == FBPTestWord
 }
 
 // GetResetProcessCmd [C_RP_NA_1] Obtain the reset process command information body (information object address, reset process command qualifier)
 func (sf *ASDU) GetResetProcessCmd() (InfoObjAddr, QualifierOfResetProcessCmd) {
+	defer sf.restoreInfoObj(sf.InfoObj)
 	return sf.DecodeInfoObjAddr(), QualifierOfResetProcessCmd(sf.InfoObj[0])
 }
 
 // GetDelayAcquireCommand [C_CD_NA_1] Get delay Get command information body (information object address, delay in milliseconds)
 func (sf *ASDU) GetDelayAcquireCommand() (InfoObjAddr, uint16) {
+	defer sf.restoreInfoObj(sf.InfoObj)
 	return sf.DecodeInfoObjAddr(), sf.DecodeUint16()
 }
 
 // GetTestCommandCP56Time2a [C_TS_TA_1]，Obtain the test command information body (information object address, whether it is a test word)
 func (sf *ASDU) GetTestCommandCP56Time2a() (InfoObjAddr, bool, time.Time) {
+	defer sf.restoreInfoObj(sf.InfoObj)
 	return sf.DecodeInfoObjAddr(), sf.DecodeUint16() == FBPTestWord, sf.DecodeCP56Time2a()
 }

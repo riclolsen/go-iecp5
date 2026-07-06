@@ -626,6 +626,12 @@ func (sf *ASDU) UnmarshalBinary(rawAsdu []byte) error {
 	return sf.FixInfoObjSize()
 }
 
+// restoreInfoObj resets the InfoObj window. The Get* decoders advance
+// InfoObj while parsing; they restore it on exit (via
+// "defer sf.restoreInfoObj(sf.InfoObj)") so decoding leaves the ASDU intact
+// and getters/SendReplyMirror can be used in any order and repeatedly.
+func (sf *ASDU) restoreInfoObj(saved []byte) { sf.InfoObj = saved }
+
 // FixInfoObjSize fix information object size
 func (sf *ASDU) FixInfoObjSize() error {
 	// fixed element size
