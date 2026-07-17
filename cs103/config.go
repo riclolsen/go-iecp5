@@ -15,6 +15,21 @@ import (
 // cs101 package (both companion standards use the same FT1.2 serial link).
 type SerialConfig = cs101.SerialConfig
 
+// TransportType and TCPConfig re-export the cs101 transport selection: the
+// FT1.2 frames can be carried over a local serial port or encapsulated in a
+// TCP stream (terminal server / serial-device server).
+type (
+	TransportType = cs101.TransportType
+	TCPConfig     = cs101.TCPConfig
+)
+
+// Transport selections.
+const (
+	TransportSerial    = cs101.TransportSerial
+	TransportTCPClient = cs101.TransportTCPClient
+	TransportTCPServer = cs101.TransportTCPServer
+)
+
 // Parameter ranges and defaults.
 const (
 	DefaultTimeoutResponseT1 = 10 * time.Second
@@ -41,8 +56,17 @@ const (
 // balanced procedure). The link address and the ASDU common address are one
 // octet and conventionally equal.
 type Config struct {
-	// Serial port settings.
+	// Transport selects how the FT1.2 frames are carried: a local serial
+	// port (TransportSerial, the default) or a TCP stream — encapsulated
+	// 103, e.g. through a terminal server (TransportTCPClient dials out,
+	// TransportTCPServer listens).
+	Transport TransportType
+
+	// Serial port settings (used when Transport is TransportSerial).
 	Serial SerialConfig
+
+	// TCP transport settings (used when Transport is not TransportSerial).
+	TCP TCPConfig
 
 	// LinkAddress is the address of the (single/default) secondary station.
 	// More stations are added with ClientOption.AddSecondaryAddress.
@@ -79,11 +103,23 @@ func (sf *Config) Valid() error {
 	if sf == nil {
 		return errors.New("invalid nil config")
 	}
-	if sf.Serial.Address == "" {
-		return errors.New("serial address (port name) must be configured")
-	}
-	if sf.Serial.BaudRate <= 0 {
-		return errors.New("serial baud rate must be positive")
+	switch sf.Transport {
+	case TransportSerial:
+		if sf.Serial.Address == "" {
+			return errors.New("serial address (port name) must be configured")
+		}
+		if sf.Serial.BaudRate <= 0 {
+			return errors.New("serial baud rate must be positive")
+		}
+	case TransportTCPClient, TransportTCPServer:
+		if sf.TCP.Address == "" {
+			return errors.New("TCP address must be configured for the TCP transport")
+		}
+		if sf.TCP.ConnectTimeout == 0 {
+			sf.TCP.ConnectTimeout = cs101.DefaultTCPConnectTimeout
+		}
+	default:
+		return errors.New("invalid transport type")
 	}
 
 	if sf.TimeoutResponseT1 == 0 {
@@ -121,6 +157,15 @@ func (sf *Config) Valid() error {
 	}
 
 	return nil
+}
+
+// transportLabel returns a short description of the configured endpoint
+// address, for logger prefixes.
+func (sf *Config) transportLabel() string {
+	if sf.Transport == TransportSerial {
+		return sf.Serial.Address
+	}
+	return sf.TCP.Address
 }
 
 // DefaultConfig provides a default CS103 configuration.

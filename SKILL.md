@@ -20,6 +20,7 @@ Detailed docs: `docs/asdu.md`, `docs/cs104.md`, `docs/cs101.md`, `docs/cs103.md`
 | Master on a serial line (RS-232/485) | `cs101.Client` |
 | Outstation on a serial line | `cs101.Server` |
 | Master for protection relays (serial) | `cs103.Client` |
+| 101/103 through a terminal server (serial-over-TCP) | same endpoints with `cfg.Transport = TransportTCPClient/Server` |
 
 Vocabulary: master = controlling station = client; outstation = RTU = slave =
 controlled station = server. Monitor direction = data flowing to the master
@@ -227,6 +228,12 @@ _ = srv.Start()
   same `LinkAddress`; then both sides transmit spontaneously.
 - Multi-drop targeting: `cli.SendTo(pack, linkAddr)`; `cli.Send` targets the
   first configured secondary.
+- TCP encapsulation (terminal server): `cfg.Transport =
+  cs101.TransportTCPClient` (dial) or `TransportTCPServer` (listen, one
+  connection at a time) with `cfg.TCP = cs101.TCPConfig{Address:
+  "host:2400"}`; `cfg.Serial` is then unused. Same fields exist on
+  `cs103.Config`. Optional `TCPConfig.TLSConfig`. It is still 101/103
+  framing inside TCP — not IEC 104.
 
 ## Recipe: IEC 103 relay master
 

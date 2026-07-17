@@ -154,6 +154,10 @@ Runnable programs live under [`_examples`](_examples) (each buildable with
   identification collection, automatic time sync + general interrogation,
   cyclic measurand polling (class 2) with event fetch on ACD (class 1),
   general commands with RII-matched acknowledgements, multi-drop.
+- TCP-encapsulated 101/103: the FT1.2 frames of both serial protocols can
+  be carried over a TCP stream (terminal server / serial-device server)
+  instead of a local port — `Config.Transport` selects serial (default),
+  TCP dial-out or TCP listen, with optional TLS.
 
 ## Not implemented
 

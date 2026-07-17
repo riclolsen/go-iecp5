@@ -15,8 +15,6 @@ import (
 
 	"github.com/riclolsen/go-iecp5/clog"
 	"github.com/riclolsen/go-iecp5/cs101"
-
-	"go.bug.st/serial"
 )
 
 // Connection states
@@ -133,8 +131,12 @@ func NewClient(handler ClientHandlerInterface, o *ClientOption) *Client {
 		tempLogger.Warn("Invalid CS103 config provided, using defaults. Error: %v", err)
 		opt.config = DefaultConfig()
 	}
-	if opt.config.Serial.Address == "" {
+	if opt.config.Transport == TransportSerial && opt.config.Serial.Address == "" {
 		tempLogger.Error("Serial port address (e.g., COM3 or /dev/ttyS0) must be set in the CS103 config")
+		return nil
+	}
+	if opt.config.Transport != TransportSerial && opt.config.TCP.Address == "" {
+		tempLogger.Error("TCP address must be set in the CS103 config for the TCP transport")
 		return nil
 	}
 
@@ -146,7 +148,7 @@ func NewClient(handler ClientHandlerInterface, o *ClientOption) *Client {
 		rcvASDU:          make(chan *ASDU, 50),
 		linkReq:          make(chan linkRequest, 8),
 		sendQueue:        make([]outgoingASDU, 0, opt.config.MaxSendQueueSize),
-		Clog:             clog.NewLogger(fmt.Sprintf("cs103 client [%s] => ", opt.config.Serial.Address)),
+		Clog:             clog.NewLogger(fmt.Sprintf("cs103 client [%s] => ", opt.config.transportLabel())),
 		onConnect:        func(*Client) {},
 		onConnectionLost: func(*Client, error) {},
 		onConnectError:   func(*Client, error) {},
@@ -209,10 +211,12 @@ func (sf *Client) Start() error {
 	return nil
 }
 
-// connectionManager handles the serial lifecycle and reconnection.
+// connectionManager handles the transport lifecycle and reconnection.
 func (sf *Client) connectionManager() {
 	sf.Debug("Connection manager started")
+	transporter := cs101.NewTransporter(sf.option.config.Transport, sf.option.config.Serial, sf.option.config.TCP)
 	defer func() {
+		_ = transporter.Close()
 		sf.setConnectStatus(statusInitial)
 		sf.Debug("Connection manager stopped")
 	}()
@@ -225,21 +229,14 @@ func (sf *Client) connectionManager() {
 		}
 
 		sf.setConnectStatus(statusConnecting)
-		sf.Debug("Connecting to serial port %s...", sf.option.config.Serial.Address)
+		sf.Debug("Opening %s transport (%s)...", sf.option.config.Transport, sf.option.config.transportLabel())
 
-		mode := &serial.Mode{
-			BaudRate: sf.option.config.Serial.BaudRate,
-			DataBits: sf.option.config.Serial.DataBits,
-			Parity:   sf.option.config.Serial.Parity,
-			StopBits: sf.option.config.Serial.StopBits,
-		}
-		port, err := serial.Open(sf.option.config.Serial.Address, mode)
-		if err == nil && sf.option.config.Serial.Timeout > 0 {
-			err = port.SetReadTimeout(sf.option.config.Serial.Timeout)
-		}
-
+		conn, desc, err := transporter.Open(sf.ctx)
 		if err != nil {
-			sf.Error("Failed to open serial port %s or set timeout: %v", sf.option.config.Serial.Address, err)
+			if sf.ctx.Err() != nil {
+				return // Close() was called while opening
+			}
+			sf.Error("Failed to open transport: %v", err)
 			sf.setConnectStatus(statusDisconnected)
 			sf.onConnectError(sf, err)
 			if !sf.option.autoReconnect {
@@ -253,8 +250,8 @@ func (sf *Client) connectionManager() {
 			}
 		}
 
-		sf.Debug("Serial port %s connected successfully", sf.option.config.Serial.Address)
-		sf.port = port
+		sf.Debug("%s connected successfully", desc)
+		sf.port = conn
 		sf.setConnectStatus(statusConnected)
 
 		sf.connCtx, sf.connCancel = context.WithCancel(sf.ctx)

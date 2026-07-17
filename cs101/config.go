@@ -55,8 +55,17 @@ const (
 
 // Config defines an IEC 60870-5-101 configuration.
 type Config struct {
-	// Serial port settings
+	// Transport selects how the FT1.2 frames are carried: a local serial
+	// port (TransportSerial, the default) or a TCP stream — encapsulated
+	// 101, e.g. through a terminal server / serial-device server
+	// (TransportTCPClient dials out, TransportTCPServer listens).
+	Transport TransportType
+
+	// Serial port settings (used when Transport is TransportSerial).
 	Serial SerialConfig
+
+	// TCP transport settings (used when Transport is not TransportSerial).
+	TCP TCPConfig
 
 	// Transmission Mode (Balanced or Unbalanced)
 	Mode TransmissionMode
@@ -104,13 +113,24 @@ func (sf *Config) Valid() error {
 		return errors.New("invalid nil config")
 	}
 
-	// Validate SerialConfig (basic check, detailed check in openSerialPort)
-
-	if sf.Serial.Address == "" {
-		return errors.New("serial address (port name) must be configured")
-	}
-	if sf.Serial.BaudRate <= 0 {
-		return errors.New("serial baud rate must be positive")
+	// Validate the transport
+	switch sf.Transport {
+	case TransportSerial:
+		if sf.Serial.Address == "" {
+			return errors.New("serial address (port name) must be configured")
+		}
+		if sf.Serial.BaudRate <= 0 {
+			return errors.New("serial baud rate must be positive")
+		}
+	case TransportTCPClient, TransportTCPServer:
+		if sf.TCP.Address == "" {
+			return errors.New("TCP address must be configured for the TCP transport")
+		}
+		if sf.TCP.ConnectTimeout == 0 {
+			sf.TCP.ConnectTimeout = DefaultTCPConnectTimeout
+		}
+	default:
+		return errors.New("invalid transport type")
 	}
 	// Validate Transmission Mode
 	if sf.Mode != ModeUnbalanced && sf.Mode != ModeBalanced {

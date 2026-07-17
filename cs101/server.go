@@ -17,7 +17,6 @@ import (
 
 	"github.com/riclolsen/go-iecp5/asdu"
 	"github.com/riclolsen/go-iecp5/clog"
-	"go.bug.st/serial"
 )
 
 // Server represents an IEC101 Secondary Station (Slave). In balanced mode it
@@ -58,8 +57,9 @@ type Server struct {
 	primNextInit time.Time // throttle for ResetLink attempts
 
 	// Connection Status & Control
-	connStatus uint32 // statusInitial, statusConnecting, etc.
-	rwMux      sync.RWMutex
+	connStatus        uint32 // statusInitial, statusConnecting, etc.
+	reconnectInterval time.Duration
+	rwMux             sync.RWMutex
 	clog.Clog
 	wg         sync.WaitGroup
 	ctx        context.Context    // Controls the main run loop
@@ -78,13 +78,14 @@ type handlerASDUPayload struct {
 func NewServer(handler ServerHandlerInterface) *Server {
 	// Use default config and params initially. User should set them via methods.
 	srv := &Server{
-		config:         DefaultConfig(),
-		params:         *asdu.ParamsStandard101, // Use CS101 standard params
-		handler:        handler,
-		rcvFrame:       make(chan *Frame, 20),
-		sendFrame:      make(chan *Frame, 20),
-		handlerPayload: make(chan handlerASDUPayload, 50),
-		Clog:           clog.NewLogger("cs101 server => "), // Placeholder address initially
+		config:            DefaultConfig(),
+		params:            *asdu.ParamsStandard101, // Use CS101 standard params
+		handler:           handler,
+		rcvFrame:          make(chan *Frame, 20),
+		sendFrame:         make(chan *Frame, 20),
+		handlerPayload:    make(chan handlerASDUPayload, 50),
+		reconnectInterval: DefaultReconnectInterval,
+		Clog:              clog.NewLogger("cs101 server => "), // Placeholder address initially
 	}
 	srv.Clog.LogMode(true) // Enable logging by default
 	return srv
@@ -97,7 +98,7 @@ func (sf *Server) SetConfig(cfg Config) *Server {
 	} else {
 		sf.config = cfg
 		// Update logger prefix if address changed
-		sf.Clog = clog.NewLogger(fmt.Sprintf("cs101 server [%s] => ", cfg.Serial.Address))
+		sf.Clog = clog.NewLogger(fmt.Sprintf("cs101 server [%s] => ", cfg.transportLabel()))
 		sf.Clog.LogMode(true) // Re-enable logging
 	}
 	return sf
@@ -124,16 +125,30 @@ func (sf *Server) isBalanced() bool {
 	return sf.config.Mode == ModeBalanced
 }
 
-// Start opens the serial port and begins processing frames.
+// SetReconnectInterval sets the retry interval used by the TCP transports
+// after a failed open (default 1 minute). Not used with the serial
+// transport, which is opened once.
+func (sf *Server) SetReconnectInterval(t time.Duration) *Server {
+	if t > 0 {
+		sf.reconnectInterval = t
+	}
+	return sf
+}
+
+// Start opens the configured transport and begins processing frames.
 func (sf *Server) Start() error {
 	sf.rwMux.Lock()
 	if atomic.LoadUint32(&sf.connStatus) != statusInitial {
 		sf.rwMux.Unlock()
 		return errors.New("server already started or starting")
 	}
-	if sf.config.Serial.Address == "" {
+	if sf.config.Transport == TransportSerial && sf.config.Serial.Address == "" {
 		sf.rwMux.Unlock()
 		return errors.New("serial port address not configured")
+	}
+	if sf.config.Transport != TransportSerial && sf.config.TCP.Address == "" {
+		sf.rwMux.Unlock()
+		return errors.New("TCP address not configured for the TCP transport")
 	}
 	sf.setConnectStatus(statusConnecting)
 	sf.ctx, sf.cancel = context.WithCancel(context.Background())
@@ -143,34 +158,60 @@ func (sf *Server) Start() error {
 	return nil
 }
 
-// run manages the serial port connection and protocol loops.
+// run manages the transport connection(s) and protocol loops. With the
+// serial transport it serves the port until closed (historic behavior);
+// with the TCP transports it keeps accepting/redialing until Close is
+// called, serving one connection at a time.
 func (sf *Server) run() {
 	sf.Debug("Server run loop started")
+	transporter := NewTransporter(sf.config.Transport, sf.config.Serial, sf.config.TCP)
 	defer func() {
+		_ = transporter.Close()
 		sf.setConnectStatus(statusInitial)
 		sf.Debug("Server run loop stopped")
 	}()
 
-	// --- Open Serial Port ---
-	sf.Debug("Opening serial port %s...", sf.config.Serial.Address)
-	mode := &serial.Mode{
-		BaudRate: sf.config.Serial.BaudRate,
-		DataBits: sf.config.Serial.DataBits,
-		Parity:   sf.config.Serial.Parity,
-		StopBits: sf.config.Serial.StopBits,
-	}
-	port, err := serial.Open(sf.config.Serial.Address, mode)
-	if err == nil && sf.config.Serial.Timeout > 0 {
-		err = port.SetReadTimeout(sf.config.Serial.Timeout)
-	}
+	for {
+		select {
+		case <-sf.ctx.Done():
+			return
+		default:
+		}
 
-	if err != nil {
-		sf.Error("Failed to open serial port %s or set timeout: %v", sf.config.Serial.Address, err)
-		sf.setConnectStatus(statusDisconnected)
-		return // Cannot proceed without the port
+		sf.setConnectStatus(statusConnecting)
+		sf.Debug("Opening %s transport (%s)...", sf.config.Transport, sf.config.transportLabel())
+		conn, desc, err := transporter.Open(sf.ctx)
+		if err != nil {
+			if sf.ctx.Err() != nil {
+				return
+			}
+			sf.Error("Failed to open transport: %v", err)
+			sf.setConnectStatus(statusDisconnected)
+			if sf.config.Transport == TransportSerial {
+				return // historic behavior: a serial port is opened once
+			}
+			select {
+			case <-time.After(sf.reconnectInterval):
+				continue
+			case <-sf.ctx.Done():
+				return
+			}
+		}
+
+		sf.Debug("%s connected", desc)
+		sf.serveConn(conn)
+
+		if sf.config.Transport == TransportSerial {
+			return // serial session ended (Close or port failure)
+		}
+		// TCP: loop back to accept/redial the next connection
 	}
-	sf.Debug("Serial port %s opened successfully", sf.config.Serial.Address)
-	sf.port = port
+}
+
+// serveConn runs the protocol loops over one established connection until
+// it ends (Close, peer disconnect or I/O error).
+func (sf *Server) serveConn(conn io.ReadWriteCloser) {
+	sf.port = conn
 	sf.setConnectStatus(statusConnected)
 	atomic.StoreUint32(&sf.linkStatus, linkStateReset)
 	sf.fcbExpected = true
@@ -180,7 +221,7 @@ func (sf *Server) run() {
 	sf.primRetry = 0
 	sf.primNextInit = time.Now()
 
-	// Drain channel leftovers from a previous run
+	// Drain channel leftovers from a previous connection
 drain:
 	for {
 		select {
@@ -205,7 +246,7 @@ drain:
 	<-sf.connCtx.Done()
 
 	// Cleanup
-	sf.Debug("Connection context done, cleaning up server.")
+	sf.Debug("Connection context done, cleaning up connection.")
 	sf.setConnectStatus(statusDisconnected)
 	_ = sf.port.Close()
 	sf.port = nil
