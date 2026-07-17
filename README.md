@@ -14,9 +14,10 @@ Requires Go 1.25+. Serial support uses [go.bug.st/serial](https://github.com/bug
 
 | Package | Purpose |
 |---------|---------|
-| [`asdu`](docs/asdu.md) | Application layer: ASDU encode/decode for the standard type identifications, cause of transmission, quality descriptors, time tags |
+| [`asdu`](docs/asdu.md) | Application layer for 101/104: ASDU encode/decode for the standard type identifications, cause of transmission, quality descriptors, time tags |
 | [`cs104`](docs/cs104.md) | IEC 60870-5-104 client (master) and server (slave) over TCP/IP, with optional TLS |
 | [`cs101`](docs/cs101.md) | IEC 60870-5-101 primary station (master) and secondary station (slave) over serial, unbalanced (multi-drop) and balanced modes |
+| [`cs103`](docs/cs103.md) | IEC 60870-5-103 primary station (master) for protection equipment over serial, with its own 103 application layer (FUN/INF addressing, measurands, CP32 time) |
 | `clog` | Pluggable logging used by the transport packages |
 
 Full documentation:
@@ -24,6 +25,7 @@ Full documentation:
 - [Application layer (`asdu`) reference](docs/asdu.md)
 - [IEC 60870-5-104 guide (`cs104`)](docs/cs104.md)
 - [IEC 60870-5-101 guide (`cs101`)](docs/cs101.md)
+- [IEC 60870-5-103 guide (`cs103`)](docs/cs103.md)
 - [SKILL.md](SKILL.md) — condensed build guide for AI coding agents
 
 ## Quick start: IEC 104 server (slave / controlled station)
@@ -148,6 +150,10 @@ Runnable programs live under [`_examples`](_examples) (each buildable with
   correct FCB tracking, class 1/2 data buffering, ACD/DFC signalling and
   multi-drop polling; balanced mode with both stations transmitting
   spontaneously (DIR bit).
+- cs103 (master): automatic link initialization (status/reset CU), device
+  identification collection, automatic time sync + general interrogation,
+  cyclic measurand polling (class 2) with event fetch on ACD (class 1),
+  general commands with RII-matched acknowledgements, multi-drop.
 
 ## Not implemented
 
@@ -158,6 +164,8 @@ Runnable programs live under [`_examples`](_examples) (each buildable with
   command ASDUs are delivered to the generic `ASDUHandler`, and the
   application decides how to confirm/execute them (the S/E bit is available
   via `QualifierOfCommand.InSelect`).
+- cs103: generic services (structured GIN/GDD/GID codecs), disturbance data
+  transfer (ASDU 23–31) and the secondary (device) side.
 
 ## License
 

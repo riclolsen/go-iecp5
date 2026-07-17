@@ -1,13 +1,14 @@
 ---
 name: go-iecp5
-description: Build IEC 60870-5-104 (TCP) and IEC 60870-5-101 (serial) SCADA/telecontrol masters and outstations in Go with the go-iecp5 library. Use when implementing an IEC 104 client/server, an IEC 101 primary/secondary station, a protocol gateway, an RTU simulator, or when parsing/sending ASDUs (single points, measured values, commands, interrogation).
+description: Build IEC 60870-5-104 (TCP), IEC 60870-5-101 (serial) and IEC 60870-5-103 (protection relays) SCADA/telecontrol masters and outstations in Go with the go-iecp5 library. Use when implementing an IEC 104 client/server, an IEC 101 primary/secondary station, an IEC 103 relay master, a protocol gateway, an RTU simulator, or when parsing/sending ASDUs (single points, measured values, commands, interrogation).
 ---
 
-# Building IEC 60870-5-104/101 apps with go-iecp5
+# Building IEC 60870-5-104/101/103 apps with go-iecp5
 
 Module: `github.com/riclolsen/go-iecp5` (Go ≥ 1.25, GPL v3).
-Packages: `asdu` (application layer), `cs104` (TCP), `cs101` (serial), `clog` (logging).
-Detailed docs: `docs/asdu.md`, `docs/cs104.md`, `docs/cs101.md`.
+Packages: `asdu` (101/104 application layer), `cs104` (TCP), `cs101` (serial),
+`cs103` (protection relays, serial, master only), `clog` (logging).
+Detailed docs: `docs/asdu.md`, `docs/cs104.md`, `docs/cs101.md`, `docs/cs103.md`.
 
 ## Pick the right endpoint
 
@@ -18,6 +19,7 @@ Detailed docs: `docs/asdu.md`, `docs/cs104.md`, `docs/cs101.md`.
 | Outstation that dials out to the master (NAT) | `cs104.NewServerSpecial` |
 | Master on a serial line (RS-232/485) | `cs101.Client` |
 | Outstation on a serial line | `cs101.Server` |
+| Master for protection relays (serial) | `cs103.Client` |
 
 Vocabulary: master = controlling station = client; outstation = RTU = slave =
 controlled station = server. Monitor direction = data flowing to the master
@@ -225,6 +227,40 @@ _ = srv.Start()
   same `LinkAddress`; then both sides transmit spontaneously.
 - Multi-drop targeting: `cli.SendTo(pack, linkAddr)`; `cli.Send` targets the
   first configured secondary.
+
+## Recipe: IEC 103 relay master
+
+103 is a different application layer (own package, no `asdu.Params`): FUN/INF
+addressing instead of IOAs, 13-bit measurands, CP32 time tags. The client
+automates the whole procedure — link init, identification collection, time
+sync + general interrogation (`AutoInit`, default on), class 2 polling with
+class 1 event fetch on ACD.
+
+```go
+opt := cs103.NewOption()
+cfg := cs103.DefaultConfig()
+cfg.Serial = cs103.SerialConfig{Address: "COM4", BaudRate: 9600, DataBits: 8,
+	StopBits: serial.OneStopBit, Parity: serial.EvenParity}
+cfg.LinkAddress = 3 // relay address (multi-drop: opt.AddSecondaryAddress(...))
+_ = opt.SetConfig(cfg)
+
+cli := cs103.NewClient(handler, opt) // cs103.ClientHandlerInterface; nil if serial unset
+_ = cli.Start()
+
+// commands / requests (queued):
+_ = cli.GeneralCommand(3, cs103.FunOvercurrentProtection,
+	cs103.InfAutoRecloserActive, cs103.DCOOn, 42 /* RII */)
+_ = cli.GeneralInterrogation(3, 1)
+_ = cli.TimeSync(3)
+```
+
+Handler dispatch: ASDU 1/2 → `TimeTaggedHandler` (check `a.Coa`:
+`CauseSpontaneous` = event, `CauseGI` = interrogation reply,
+`CauseCommandAckPos/Neg` = command result with the RII in `info.Sin`);
+ASDU 3/9 → `MeasurandsHandler` (`m.Values[i].Float64()` = fraction of full
+scale); ASDU 5 → `IdentificationHandler`; ASDU 8 → `GITerminationHandler`;
+rest → `ASDUHandler`. The device is identified by `a.CommonAddr`.
+Not implemented: generic services codecs, disturbance data, device side.
 
 ## Cause-of-transmission cheat sheet
 
