@@ -1,0 +1,144 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to build and release'
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  GO111MODULE: on
+  GOPROXY: "https://proxy.golang.org"
+  CGO_ENABLED: "0"
+
+jobs:
+  release:
+    name: Build all platforms and publish release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: |
+            go.sum
+            _examples/cs104_explorer/go.sum
+
+      - name: Resolve version
+        id: version
+        run: echo "version=${{ github.event.inputs.tag || github.ref_name }}" >> "$GITHUB_OUTPUT"
+
+      - name: Build for every Go target platform
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -uo pipefail
+
+          # module-root : package-to-build : output binary name
+          PROGRAMS="
+          .:./_examples/cs101_client_general:cs101_client_general
+          .:./_examples/cs104_client_general:cs104_client_general
+          .:./_examples/cs104_server_general:cs104_server_general
+          .:./_examples/cs104_server_special:cs104_server_special
+          _examples/cs104_explorer:.:cs104_explorer
+          "
+          total=$(echo "$PROGRAMS" | grep -c ':')
+
+          root="$PWD"
+          mkdir -p "$root/dist"
+          : > "$root/build-report.txt"
+
+          for target in $(go tool dist list); do
+            export GOOS="${target%/*}"
+            export GOARCH="${target#*/}"
+
+            ext=""
+            [ "$GOOS" = "windows" ] && ext=".exe"
+            [ "$GOARCH" = "wasm" ] && ext=".wasm"
+
+            stage="$root/build/go-iecp5_${VERSION}_${GOOS}_${GOARCH}"
+            mkdir -p "$stage"
+            built=0
+            skipped=""
+
+            for prog in $PROGRAMS; do
+              modroot="${prog%%:*}"
+              rest="${prog#*:}"
+              pkg="${rest%%:*}"
+              name="${rest#*:}"
+
+              if (cd "$root/$modroot" && go build -trimpath -ldflags "-s -w" \
+                    -o "$stage/${name}${ext}" "$pkg") 2>>"$root/build-errors.log"; then
+                built=$((built + 1))
+              else
+                skipped="$skipped $name"
+              fi
+            done
+
+            if [ "$built" -eq 0 ]; then
+              printf '%s/%s\tskipped (nothing builds for this platform)\n' \
+                "$GOOS" "$GOARCH" >> "$root/build-report.txt"
+              rm -rf "$stage"
+              continue
+            fi
+
+            cp "$root/README.md" "$root/LICENSE" "$stage/"
+
+            base="$(basename "$stage")"
+            if [ "$GOOS" = "windows" ]; then
+              (cd "$root/build" && zip -qr "$root/dist/${base}.zip" "$base")
+            else
+              tar -czf "$root/dist/${base}.tar.gz" -C "$root/build" "$base"
+            fi
+
+            if [ -n "$skipped" ]; then
+              printf '%s/%s\t%s of %s programs (skipped:%s)\n' \
+                "$GOOS" "$GOARCH" "$built" "$total" "$skipped" >> "$root/build-report.txt"
+            else
+              printf '%s/%s\tall %s programs\n' "$GOOS" "$GOARCH" "$total" >> "$root/build-report.txt"
+            fi
+          done
+
+          (cd "$root/dist" && sha256sum * > SHA256SUMS.txt)
+
+          {
+            echo "## Build results for ${VERSION}"
+            echo
+            echo '```'
+            cat "$root/build-report.txt"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          ls -lh "$root/dist"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: go-iecp5-${{ steps.version.outputs.version }}
+          path: dist/*
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          if gh release view "$VERSION" >/dev/null 2>&1; then
+            gh release upload "$VERSION" dist/* --clobber
+          else
+            gh release create "$VERSION" dist/* --title "$VERSION" --generate-notes
+          fi
