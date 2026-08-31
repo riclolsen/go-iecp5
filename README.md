@@ -18,6 +18,7 @@ Requires Go 1.25+. Serial support uses [go.bug.st/serial](https://github.com/bug
 | [`cs104`](docs/cs104.md) | IEC 60870-5-104 client (master) and server (slave) over TCP/IP, with optional TLS |
 | [`cs101`](docs/cs101.md) | IEC 60870-5-101 primary station (master) and secondary station (slave) over serial, unbalanced (multi-drop) and balanced modes |
 | [`cs103`](docs/cs103.md) | IEC 60870-5-103 primary station (master) for protection equipment over serial, with its own 103 application layer (FUN/INF addressing, measurands, CP32 time) |
+| [`filetransfer`](docs/filetransfer.md) | IEC 60870-5-101/104 file transfer procedure (monitor direction) with a pluggable file store |
 | `clog` | Pluggable logging used by the transport packages |
 
 Full documentation:
@@ -26,6 +27,7 @@ Full documentation:
 - [IEC 60870-5-104 guide (`cs104`)](docs/cs104.md)
 - [IEC 60870-5-101 guide (`cs101`)](docs/cs101.md)
 - [IEC 60870-5-103 guide (`cs103`)](docs/cs103.md)
+- [File transfer guide (`filetransfer`)](docs/filetransfer.md)
 - [SKILL.md](SKILL.md) — condensed build guide for AI coding agents
 
 ## Quick start: IEC 104 server (slave / controlled station)
@@ -124,13 +126,17 @@ and balanced point-to-point mode.
 Runnable programs live under [`_examples`](_examples) (each buildable with
 `go run .` from its directory):
 
-- [`cs104_explorer`](_examples/cs104_explorer) — an interactive terminal IEC 104
-  master (Bubble Tea TUI): connect to servers, issue interrogation/clock/test/
-  reset requests, send control commands, and watch received points and a live
-  protocol log. It is a self-contained module so its UI dependencies stay out
-  of the library.
-- `cs104_server_general`, `cs104_client_general`, `cs104_server_special` — minimal
-  104 server, client, and reverse-connection server.
+- [`cs104_explorer`](_examples/cs104_explorer) — a full-screen terminal
+  browser for one IEC 104 outstation, keyboard or mouse driven: six screens
+  (overview, points with trends and quality, events, log, file transfer,
+  help), filtering and sorting, a point inspector, CSV export, an editable
+  connection, and select-before-execute commands with confirmation. `-demo`
+  runs a simulated outstation in-process, so it needs no hardware. It is a
+  self-contained module so its UI dependencies stay out of the library.
+- `cs104_server_general` — minimal 104 outstation that also serves two sample
+  files over file transfer and announces one on connect.
+- `cs104_client_general`, `cs104_server_special` — minimal 104 client and
+  reverse-connection server.
 - `cs101_client_general` — minimal 101 serial master.
 
 ## Implemented
@@ -158,11 +164,17 @@ Runnable programs live under [`_examples`](_examples) (each buildable with
   be carried over a TCP stream (terminal server / serial-device server)
   instead of a local port — `Config.Transport` selects serial (default),
   TCP dial-out or TCP listen, with optional TLS.
+- File transfer (`F_FR_NA_1` … `F_DR_TA_1`) in the monitor direction: ASDU
+  codecs in `asdu`, and the transfer procedure — directory call, select,
+  sectioning, segmentation, per-section checksum verification and retry —
+  in the `filetransfer` package, for both master and outstation, over a
+  pluggable file store.
 
 ## Not implemented
 
-- File transfer ASDUs (`F_FR_NA_1` … `F_DR_TA_1`) — type identifiers are
-  defined but there is no file transfer service.
+- File transfer in the **control** direction (master → outstation), and
+  `F_SC_NB_1` <127> (query log). The monitor direction is implemented; see
+  [the guide](docs/filetransfer.md) for the exact scope.
 - IEC 62351-5 security/authentication ASDUs (`S_*`) — enumerated only.
 - Select-before-execute command supervision is left to the application:
   command ASDUs are delivered to the generic `ASDUHandler`, and the

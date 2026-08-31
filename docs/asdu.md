@@ -109,8 +109,26 @@ Control direction (master → device):
 | `P_ME_NA_1` / `P_ME_NB_1` / `P_ME_NC_1` | 110/111/112 | parameter of measured value |
 | `P_AC_NA_1` | 113 | parameter activation |
 
-File transfer types (120–127) and IEC 62351-5 security types are enumerated
-but not implemented.
+File transfer:
+
+| TypeID | Value | Content |
+|--------|-------|---------|
+| `F_FR_NA_1` | 120 | file ready |
+| `F_SR_NA_1` | 121 | section ready |
+| `F_SC_NA_1` | 122 | call directory, select file, call file, call section |
+| `F_LS_NA_1` | 123 | last section, last segment |
+| `F_AF_NA_1` | 124 | ack file, ack section |
+| `F_SG_NA_1` | 125 | segment (the one variable-length ASDU) |
+| `F_DR_TA_1` | 126 | directory |
+
+These have send helpers (`FileReady`, `SectionReady`, `CallOrSelectFile`,
+`LastSectionOrSegment`, `AckFileOrSection`, `FileSegment`, `FileDirectory`)
+and matching `Get*` decoders, plus the qualifier codecs (FRQ, SRQ, SCQ, AFQ,
+LSQ, SOF) and `FileChecksum`. The transfer *procedure* built on them lives in
+the [`filetransfer`](filetransfer.md) package.
+
+`F_SC_NB_1` <127> (query log) and the IEC 62351-5 security types are
+enumerated but not implemented.
 
 ## Sending data (monitor direction helpers)
 

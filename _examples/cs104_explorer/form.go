@@ -3,127 +3,145 @@ package main
 import (
 	"fmt"
 	"strconv"
-	"strings"
 
-	"github.com/riclolsen/go-iecp5/asdu"
+	tea "github.com/charmbracelet/bubbletea"
 )
 
-// cmdKind is one selectable entry in the command builder.
-type cmdKind struct {
-	name   string
-	typeID asdu.TypeID
+// The connection editor exists because a common address read off a drawing is
+// a guess until something answers, and restarting the tool to try 2 instead
+// of 1 is how ten minutes of commissioning becomes an afternoon.
+
+type formField struct {
+	label string
+	value string
+	hint  string
 }
 
-var cmdKinds = []cmdKind{
-	{"Single command (C_SC_NA_1)", asdu.C_SC_NA_1},
-	{"Double command (C_DC_NA_1)", asdu.C_DC_NA_1},
-	{"Step command (C_RC_NA_1)", asdu.C_RC_NA_1},
-	{"Setpoint float (C_SE_NC_1)", asdu.C_SE_NC_1},
-	{"Setpoint scaled (C_SE_NB_1)", asdu.C_SE_NB_1},
-	{"Setpoint normalized (C_SE_NA_1)", asdu.C_SE_NA_1},
-	{"Read command (C_RD_NA_1)", asdu.C_RD_NA_1},
+type formState struct {
+	active bool
+	title  string
+	fields []formField
+	cursor int
+	offset int
+	err    string
 }
 
-func parseBoolCmd(s string) bool {
-	switch strings.ToLower(strings.TrimSpace(s)) {
-	case "1", "on", "true", "t", "yes", "y", "close":
-		return true
+const (
+	fieldAddress = iota
+	fieldCommonAddr
+	fieldOriginator
+	fieldTimeout
+	fieldReconnect
+	numFields
+)
+
+func (m *Model) openConnectionForm() {
+	lk := m.conn.lk
+	m.form = formState{
+		active: true,
+		title:  "Connection",
+		fields: []formField{
+			{label: "Address", value: lk.address(), hint: "host:port, or demo"},
+			{label: "Common address (ASDU)", value: strconv.Itoa(int(lk.CommonAddr)), hint: "1..65534, 65535 broadcast"},
+			{label: "Originator address", value: strconv.Itoa(int(lk.Originator)), hint: "0..255, 0 when unused"},
+			{label: "Connect timeout", value: lk.Timeout.String(), hint: "t0, e.g. 30s"},
+			{label: "Reconnect interval", value: lk.Reconnect.String(), hint: "e.g. 10s"},
+		},
 	}
-	return false
 }
 
-func parseDoubleCmd(s string) asdu.DoubleCommand {
-	switch strings.ToLower(strings.TrimSpace(s)) {
-	case "2", "on", "true", "close":
-		return asdu.DCOOn
+func (m *Model) handleFormKey(key string) (tea.Model, tea.Cmd) {
+	f := &m.form
+	switch key {
+	case "esc":
+		m.form = formState{}
+		return m, nil
+
+	case "enter":
+		return m.applyConnectionForm()
+
+	case "tab", "down":
+		f.cursor = (f.cursor + 1) % len(f.fields)
+	case "shift+tab", "up":
+		f.cursor = (f.cursor + len(f.fields) - 1) % len(f.fields)
+
+	case "backspace":
+		v := []rune(f.fields[f.cursor].value)
+		if len(v) > 0 {
+			f.fields[f.cursor].value = string(v[:len(v)-1])
+		}
+	case "ctrl+u":
+		f.fields[f.cursor].value = ""
+	case " ", "space":
+		f.fields[f.cursor].value += " "
+
 	default:
-		return asdu.DCOOff
+		if len([]rune(key)) == 1 {
+			f.fields[f.cursor].value += key
+		}
 	}
+	return m, nil
 }
 
-func parseStepCmd(s string) asdu.StepCommand {
-	switch strings.ToLower(strings.TrimSpace(s)) {
-	case "2", "up", "higher", "+":
-		return asdu.SCOStepUP
-	default:
-		return asdu.SCOStepDown
-	}
-}
+// applyConnectionForm validates every field before touching the session: a
+// half-applied connection is worse than none.
+func (m *Model) applyConnectionForm() (tea.Model, tea.Cmd) {
+	f := &m.form
+	next := m.conn.lk
 
-func clampNorm(f float64) float64 {
-	if f > 1 {
-		return 1
+	if err := parseAddress(f.fields[fieldAddress].value, &next); err != nil {
+		f.err = err.Error()
+		f.cursor = fieldAddress
+		return m, nil
 	}
-	if f < -1 {
-		return -1
-	}
-	return f
-}
-
-// sendForm builds and queues the command described by the current form state.
-func (m *model) sendForm() {
-	if m.client == nil {
-		m.appendLog("[app] not connected — press 'c' to connect first")
-		return
-	}
-	kind := cmdKinds[m.formKind]
-
-	ioaU, err := strconv.ParseUint(strings.TrimSpace(m.inIOA.Value()), 0, 32)
+	ca, err := parseUint(f.fields[fieldCommonAddr].value, 16)
 	if err != nil {
-		m.appendLog("[app] invalid IOA: " + err.Error())
-		return
+		f.err = "common address: " + err.Error()
+		f.cursor = fieldCommonAddr
+		return m, nil
 	}
-	ioa := asdu.InfoObjAddr(ioaU)
-	ca := asdu.CommonAddr(m.ca)
-	coa := asdu.CauseOfTransmission{Cause: asdu.Activation}
-	valStr := m.inVal.Value()
-	qualU, _ := strconv.ParseUint(strings.TrimSpace(m.inQual.Value()), 10, 8)
-	qoc := asdu.QualifierOfCommand{Qual: asdu.QOCQual(qualU), InSelect: m.formSelect}
-	qos := asdu.QualifierOfSetpointCmd{Qual: asdu.QOSQual(qualU), InSelect: m.formSelect}
-
-	var sendErr error
-	switch kind.typeID {
-	case asdu.C_RD_NA_1:
-		sendErr = m.client.ReadCmd(asdu.CauseOfTransmission{Cause: asdu.Request}, ca, ioa)
-	case asdu.C_SC_NA_1:
-		sendErr = asdu.SingleCmd(m.client, asdu.C_SC_NA_1, coa, ca,
-			asdu.SingleCommandInfo{Ioa: ioa, Value: parseBoolCmd(valStr), Qoc: qoc})
-	case asdu.C_DC_NA_1:
-		sendErr = asdu.DoubleCmd(m.client, asdu.C_DC_NA_1, coa, ca,
-			asdu.DoubleCommandInfo{Ioa: ioa, Value: parseDoubleCmd(valStr), Qoc: qoc})
-	case asdu.C_RC_NA_1:
-		sendErr = asdu.StepCmd(m.client, asdu.C_RC_NA_1, coa, ca,
-			asdu.StepCommandInfo{Ioa: ioa, Value: parseStepCmd(valStr), Qoc: qoc})
-	case asdu.C_SE_NC_1:
-		f, perr := strconv.ParseFloat(strings.TrimSpace(valStr), 32)
-		if perr != nil {
-			m.appendLog("[app] invalid float value: " + perr.Error())
-			return
-		}
-		sendErr = asdu.SetpointCmdFloat(m.client, asdu.C_SE_NC_1, coa, ca,
-			asdu.SetpointCommandFloatInfo{Ioa: ioa, Value: float32(f), Qos: qos})
-	case asdu.C_SE_NB_1:
-		n, perr := strconv.ParseInt(strings.TrimSpace(valStr), 10, 16)
-		if perr != nil {
-			m.appendLog("[app] invalid scaled value: " + perr.Error())
-			return
-		}
-		sendErr = asdu.SetpointCmdScaled(m.client, asdu.C_SE_NB_1, coa, ca,
-			asdu.SetpointCommandScaledInfo{Ioa: ioa, Value: int16(n), Qos: qos})
-	case asdu.C_SE_NA_1:
-		f, perr := strconv.ParseFloat(strings.TrimSpace(valStr), 64)
-		if perr != nil {
-			m.appendLog("[app] invalid normalized value (expected -1..1): " + perr.Error())
-			return
-		}
-		sendErr = asdu.SetpointCmdNormal(m.client, asdu.C_SE_NA_1, coa, ca,
-			asdu.SetpointCommandNormalInfo{Ioa: ioa, Value: asdu.Normalize(int16(clampNorm(f) * 32767)), Qos: qos})
+	if ca == 0 {
+		f.err = "common address: 0 is not used"
+		f.cursor = fieldCommonAddr
+		return m, nil
+	}
+	oa, err := parseUint(f.fields[fieldOriginator].value, 8)
+	if err != nil {
+		f.err = "originator address: " + err.Error()
+		f.cursor = fieldOriginator
+		return m, nil
+	}
+	to, err := parseDurationField(f.fields[fieldTimeout].value, "connect timeout")
+	if err != nil {
+		f.err = err.Error()
+		f.cursor = fieldTimeout
+		return m, nil
+	}
+	rc, err := parseDurationField(f.fields[fieldReconnect].value, "reconnect interval")
+	if err != nil {
+		f.err = err.Error()
+		f.cursor = fieldReconnect
+		return m, nil
 	}
 
-	if sendErr != nil {
-		m.appendLog("[tx] " + kind.name + " failed: " + sendErr.Error())
-		return
+	next.CommonAddr = uint16(ca)
+	next.Originator = byte(oa)
+	next.Timeout, next.Reconnect = to, rc
+
+	// Pointing somewhere new drops the point table with it: those
+	// measurements came from a different device.
+	if !m.conn.lk.sameDevice(next) {
+		m.points = map[pointKey]*pointState{}
+		m.pointsOrder = nil
+		m.events = nil
+		m.files.clear()
+		m.addLog("info", "point table cleared: now addressing "+next.target())
 	}
-	m.appendLog(fmt.Sprintf("[tx] %s IOA=%d value=%q mode=%s -> queued",
-		kind.name, ioaU, valStr, map[bool]string{true: "select", false: "execute"}[m.formSelect]))
+
+	m.form = formState{}
+	m.connected, m.active = false, false
+	m.status = "connecting"
+	m.addLog("info", fmt.Sprintf("reconnecting to %s, common address %d",
+		next.target(), next.CommonAddr))
+	return m, m.conn.reconnect(next)
 }

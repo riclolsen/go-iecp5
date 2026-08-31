@@ -1,1 +1,7 @@
 /.idea/
+/dist/
+/build/
+*.exe
+
+# explorer downloads (cs104_explorer file transfer)
+iec104-files/

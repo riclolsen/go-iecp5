@@ -3,526 +3,1080 @@ package main
 import (
 	"fmt"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/bubbles/table"
-	"github.com/charmbracelet/bubbles/textinput"
-	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 
 	"github.com/riclolsen/go-iecp5/asdu"
-	"github.com/riclolsen/go-iecp5/cs104"
 )
 
-// tabs
+// Screen is one of the tabs.
+type Screen int
+
 const (
-	tabPoints = iota
-	tabLog
-	tabSend
+	ScreenOverview Screen = iota
+	ScreenPoints
+	ScreenEvents
+	ScreenLog
+	ScreenFiles
+	ScreenHelp
+	numScreens
 )
 
-// focus targets
+var screenNames = [numScreens]string{"Overview", "Points", "Events", "Log", "Files", "Help"}
+
+func (s Screen) isTable() bool {
+	return s == ScreenPoints || s == ScreenEvents || s == ScreenLog || s == ScreenFiles
+}
+
+// follows marks the screens where new rows arrive at the bottom and the
+// operator usually wants to watch the end of the list.
+func (s Screen) follows() bool { return s == ScreenEvents || s == ScreenLog }
+
+func (s Screen) scrolls() bool { return s.isTable() || s == ScreenHelp }
+
+func (s Screen) String() string {
+	if s < 0 || s >= numScreens {
+		return "?"
+	}
+	return screenNames[s]
+}
+
+// pointKey identifies one information object: the station it came from and
+// its information object address.
+type pointKey struct {
+	CA  uint16
+	IOA uint
+}
+
+const histCap = 120
+
+// pointState is the current value of one information object plus enough
+// history to draw a trend.
+type pointState struct {
+	Key    pointKey
+	Type   asdu.TypeID
+	Cause  asdu.Cause
+	Value  string
+	Num    float64
+	HasNum bool
+	Qds    asdu.QualityDescriptor
+	HasQds bool
+	// Stamp is the device's own time tag, zero when the type carries none.
+	Stamp   time.Time
+	Updated time.Time
+	Updates int
+	Hist    []float64
+}
+
+func (p *pointState) stale(now time.Time, limit time.Duration) bool {
+	return limit > 0 && now.Sub(p.Updated) > limit
+}
+
+// eventRow is one arrival, kept in order. What changed and when, as distinct
+// from what the value is now.
+type eventRow struct {
+	At    time.Time
+	Key   pointKey
+	Type  asdu.TypeID
+	Cause asdu.Cause
+	Value string
+	Qds   asdu.QualityDescriptor
+	HasQ  bool
+	Stamp time.Time
+}
+
+type logRow struct {
+	At    time.Time
+	Level string
+	Text  string
+}
+
 const (
-	focusMain = iota
-	focusAddr // editing connection (address + common address)
-	focusForm // editing the command builder
+	maxEvents = 5000
+	maxLogs   = 5000
 )
 
-const maxLogLines = 2000
-
-type model struct {
-	bridge *bridge
-	client *cs104.Client
-
-	addr                       string
-	ca                         uint16
-	connected, active, verbose bool
-
+// Model is the whole interface state.
+type Model struct {
 	width, height int
-	tab           int
-	focus         int
+	screen        Screen
 
-	points  map[uint]point
-	table   table.Model
-	logs    []string
-	logView viewport.Model
+	conn *connection
 
-	// command builder
-	formKind             int
-	formField            int // 0 kind, 1 IOA, 2 value, 3 mode, 4 qualifier
-	formSelect           bool
-	inIOA, inVal, inQual textinput.Model
+	status    string
+	lastErr   string
+	connected bool
+	active    bool // STARTDT confirmed: data transfer running
+	startedAt time.Time
+	linkSince time.Time
+	now       time.Time
 
-	// connection editor
-	connField        int // 0 address, 1 common address
-	connAddr, connCA textinput.Model
+	// points is keyed for update and pointsOrder keeps a stable arrival
+	// order, so the table does not reshuffle under the cursor every time a
+	// value arrives. Display order is derived from it by visiblePoints.
+	points      map[pointKey]*pointState
+	pointsOrder []pointKey
+
+	events []eventRow
+	logs   []logRow
+	files  filesState
+
+	// One cursor and scroll offset per screen, so moving between tabs does
+	// not lose the operator's place in a list they were reading.
+	cursor [numScreens]int
+	offset [numScreens]int
+
+	follow bool
+	detail bool
+	filter string
+
+	sortBy   sortKey
+	sortDesc bool
+
+	prompt promptState
+	modal  modalState
+	form   formState
+	cmd    cmdForm
+	track  cmdTracker
+	toast  toastState
+
+	// sbo selects between select-before-execute and direct execute, and
+	// confirm decides whether a command asks first. Both are on screen — sbo
+	// as a toolbar button, confirm as a standing warning when it is off —
+	// because an operator must never have to remember which mode a command
+	// tool is in.
+	sbo      bool
+	confirm  bool
+	qoc      asdu.QOCQual
+	mouse    bool
+	altmode  bool
+	staleAge time.Duration
+
+	hover    zone
+	dragging bool
+
+	// Counters behind the Overview screen.
+	rxASDU  uint64
+	txASDU  uint64
+	rxItems uint64
+	cmdSent uint64
+	cmdOK   uint64
+	cmdFail uint64
+
+	// rate counts ASDUs in 500ms buckets over the last ten seconds, and
+	// rateHist keeps the resulting number for a minute: a device that has
+	// gone quiet looks exactly like a healthy idle one until you can see
+	// that it used to be busy.
+	rate     [20]int
+	rateIdx  int
+	rateHist []float64
+
+	quitting bool
 }
 
-func initialModel(b *bridge) model {
-	cols := []table.Column{
-		{Title: "IOA", Width: 8},
-		{Title: "Type", Width: 12},
-		{Title: "Value", Width: 16},
-		{Title: "Quality", Width: 14},
-		{Title: "Cause", Width: 18},
-		{Title: "Time", Width: 12},
-		{Title: "Cnt", Width: 5},
-	}
-	t := table.New(table.WithColumns(cols), table.WithFocused(true), table.WithHeight(10))
-	st := table.DefaultStyles()
-	st.Header = st.Header.Bold(true).Foreground(lipgloss.Color("205")).BorderBottom(true)
-	st.Selected = st.Selected.Foreground(lipgloss.Color("0")).Background(lipgloss.Color("205"))
-	t.SetStyles(st)
-
-	mkInput := func(placeholder, val string, limit, width int) textinput.Model {
-		in := textinput.New()
-		in.Placeholder = placeholder
-		if val != "" {
-			in.SetValue(val)
-		}
-		in.CharLimit = limit
-		in.Width = width
-		return in
-	}
-
-	return model{
-		bridge:   b,
-		addr:     "127.0.0.1:2404",
-		ca:       1,
-		tab:      tabPoints,
-		focus:    focusMain,
-		points:   map[uint]point{},
-		table:    t,
-		logView:  viewport.New(80, 10),
-		inIOA:    mkInput("e.g. 6000", "", 10, 20),
-		inVal:    mkInput("on / off / number", "", 24, 24),
-		inQual:   mkInput("", "0", 3, 6),
-		connAddr: mkInput("host:port", "127.0.0.1:2404", 64, 32),
-		connCA:   mkInput("", "1", 5, 8),
+// NewModel builds the initial model.
+func NewModel(conn *connection) *Model {
+	return &Model{
+		screen:    ScreenOverview,
+		conn:      conn,
+		files:     newFilesState(),
+		points:    map[pointKey]*pointState{},
+		follow:    true,
+		status:    "connecting",
+		sortBy:    sortPoint,
+		confirm:   true,
+		sbo:       true,
+		qoc:       asdu.QOCShortPulseDuration,
+		mouse:     true,
+		altmode:   true,
+		staleAge:  30 * time.Second,
+		startedAt: time.Now(),
+		now:       time.Now(),
 	}
 }
 
-func (m model) Init() tea.Cmd { return textinput.Blink }
+func (m *Model) Init() tea.Cmd {
+	return tea.Batch(m.conn.wait(), tick())
+}
 
-func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+// tickMsg drives the age column, the clock and the rate meter without needing
+// a repaint on every protocol event.
+type tickMsg time.Time
+
+func tick() tea.Cmd {
+	return tea.Tick(500*time.Millisecond, func(t time.Time) tea.Msg { return tickMsg(t) })
+}
+
+func (m *Model) clock() time.Time { return m.now }
+
+func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
-		(&m).layout()
 		return m, nil
-	case logMsg:
-		(&m).appendLog(msg.line)
-		return m, nil
-	case pointsMsg:
-		(&m).applyPoints(msg.pts)
-		return m, nil
-	case statusMsg:
-		m.connected, m.active = msg.connected, msg.active
-		if msg.note != "" {
-			(&m).appendLog("[app] " + msg.note)
-		}
-		return m, nil
-	case errMsg:
-		(&m).appendLog("[err] " + msg.err.Error())
-		return m, nil
+
 	case tea.KeyMsg:
-		if msg.String() == "ctrl+c" {
-			return m, tea.Quit
+		return m.HandleKey(msg.String())
+
+	case tea.MouseMsg:
+		return m.HandleMouse(fromTeaMouse(msg))
+
+	case tickMsg:
+		m.now = time.Time(msg)
+		m.toast.expire(m.now)
+		// Roll the rate window forward one bucket.
+		m.rateIdx = (m.rateIdx + 1) % len(m.rate)
+		m.rate[m.rateIdx] = 0
+		m.rateHist = append(m.rateHist, m.eventRate())
+		if len(m.rateHist) > histCap {
+			m.rateHist = m.rateHist[len(m.rateHist)-histCap:]
 		}
-		switch m.focus {
-		case focusAddr:
-			return m.keyAddr(msg)
-		case focusForm:
-			return m.keyForm(msg)
-		default:
-			return m.keyMain(msg)
+		return m, tick()
+
+	case statusMsg:
+		m.applyStatus(msg)
+		return m, m.conn.wait()
+
+	case updateMsg:
+		m.applyUpdate(msg)
+		return m, m.conn.wait()
+
+	case logLineMsg:
+		m.addLog(msg.level, msg.text)
+		return m, m.conn.wait()
+
+	case directoryMsg:
+		m.files.applyDirectory(msg.entries)
+		m.addLog("ok", fmt.Sprintf("file directory: %d file(s)", len(msg.entries)))
+		return m, m.conn.wait()
+
+	case fileDoneMsg:
+		m.files.applyDone(msg)
+		if msg.err != nil {
+			m.addLog("error", "file transfer: "+msg.err.Error())
+			m.toast.show("error", "file transfer failed", m.now)
+		} else {
+			m.addLog("ok", fmt.Sprintf("file ioa=%d %s: %d octets saved to %s",
+				msg.ioa, nofName(msg.nof), msg.size, msg.path))
+			m.toast.show("ok", "saved "+msg.path, m.now)
+		}
+		return m, m.conn.wait()
+
+	case commandResultMsg:
+		level := "error"
+		if msg.ok {
+			level = "ok"
+			m.cmdOK++
+		} else {
+			m.cmdFail++
+			m.lastErr = msg.text
+		}
+		m.addLog(level, msg.text)
+		m.toast.show(level, msg.text, m.now)
+		return m, nil
+	}
+	return m, nil
+}
+
+func (m *Model) applyStatus(msg statusMsg) {
+	switch {
+	case msg.connected && !m.connected:
+		m.linkSince = time.Now()
+		m.addLog("ok", "connected to "+m.conn.target())
+	case !msg.connected && m.connected:
+		m.linkSince = time.Time{}
+		m.addLog("warn", "connection lost")
+	}
+	m.connected, m.active = msg.connected, msg.active
+	switch {
+	case !msg.connected:
+		m.status = "disconnected"
+	case msg.active:
+		m.status = "active"
+	default:
+		m.status = "connected (STOPDT)"
+	}
+	if msg.note != "" {
+		m.addLog("info", msg.note)
+	}
+}
+
+// HandleKey is the single implementation of every action. The mouse resolves
+// clicks to key names and calls this, so the two input methods cannot drift.
+func (m *Model) HandleKey(key string) (tea.Model, tea.Cmd) {
+	// A prompt or a dialog owns the keyboard while it is open. Commands are
+	// issued from this interface, so a keystroke must never fall through to a
+	// breaker while the operator believes they are typing.
+	if m.prompt.active {
+		return m.handlePromptKey(key)
+	}
+	if m.form.active {
+		return m.handleFormKey(key)
+	}
+	if m.cmd.active {
+		return m.handleCommandFormKey(key)
+	}
+	if m.modal.kind != modalNone {
+		return m.handleModalKey(key)
+	}
+
+	// The Files screen claims a few keys before the global bindings see them.
+	if m.screen == ScreenFiles {
+		if model, cmd, handled := m.handleFilesKey(key); handled {
+			return model, cmd
+		}
+	}
+
+	switch key {
+	case "q", "ctrl+c":
+		m.quitting = true
+		return m, tea.Quit
+
+	case "esc":
+		switch {
+		case m.filter != "":
+			m.filter = ""
+			m.toast.show("info", "filter cleared", m.now)
+		case m.detail:
+			m.detail = false
+		}
+
+	// ---- navigation ----
+	case "tab", "right":
+		return m, m.setScreen((m.screen + 1) % numScreens)
+	case "shift+tab", "left":
+		return m, m.setScreen((m.screen + numScreens - 1) % numScreens)
+	case "1", "2", "3", "4", "5", "6":
+		return m, m.setScreen(Screen(key[0] - '1'))
+	case "?":
+		return m, m.setScreen(ScreenHelp)
+
+	case "up", "k":
+		m.moveCursor(-1)
+	case "down", "j":
+		m.moveCursor(1)
+	case "pgup", "ctrl+b":
+		m.moveCursor(-m.pageSize())
+	case "pgdown", "ctrl+f":
+		m.moveCursor(m.pageSize())
+	case "home", "g":
+		m.jumpTo(0)
+	case "end", "G":
+		m.jumpTo(m.rowCount() - 1)
+
+	// ---- view ----
+	case "/":
+		m.prompt = promptState{active: true, kind: promptFilter,
+			label: "filter", input: m.filter}
+		if m.screen == ScreenOverview || m.screen == ScreenHelp {
+			m.setScreen(ScreenPoints)
+		}
+	case "f":
+		m.follow = !m.follow
+		m.toast.show("info", "follow "+onOff(m.follow), m.now)
+	case "d", "enter", " ":
+		return m.contextAction(key)
+	case "r":
+		m.sortDesc = !m.sortDesc
+	case "<":
+		m.cycleSort(-1)
+	case ">":
+		m.cycleSort(1)
+	case "x":
+		m.clearList()
+	case "e":
+		return m, m.export()
+	case "v":
+		m.conn.setVerbose(!m.conn.verbose())
+		m.toast.show("info", "protocol log "+onOff(m.conn.verbose()), m.now)
+
+	// ---- link ----
+	case "a":
+		m.addLog("tx", "STARTDT act")
+		return m, m.conn.startDT()
+	case "A":
+		m.addLog("tx", "STOPDT act")
+		return m, m.conn.stopDT()
+	case "C":
+		m.openConnectionForm()
+
+	// ---- interrogation and system commands ----
+	case "i":
+		m.txASDU++
+		m.addLog("tx", "general interrogation (C_IC_NA_1)")
+		return m, m.conn.interrogation(m.qoiGroup())
+	case "p":
+		m.txASDU++
+		m.addLog("tx", "counter interrogation (C_CI_NA_1)")
+		return m, m.conn.counterInterrogation()
+	case "t":
+		m.txASDU++
+		m.addLog("tx", "clock synchronisation (C_CS_NA_1)")
+		return m, m.conn.clockSync()
+	case "T":
+		m.txASDU++
+		m.addLog("tx", "test command (C_TS_NA_1)")
+		return m, m.conn.testCommand()
+	case "R":
+		m.openResetDialog()
+	case "s":
+		m.prompt = promptState{active: true, kind: promptRead,
+			label: "read command  information object address", input: ""}
+
+	// ---- process commands ----
+	case "o":
+		m.openCommandDialog()
+	case "O":
+		// The feedback for whatever was last sent, whether or not the
+		// dialog that sent it is still open.
+		m.openCommandFeedback()
+	case "E":
+		m.sbo = !m.sbo
+		m.toast.show("info", "commands: "+commandMode(m.sbo), m.now)
+	}
+	return m, nil
+}
+
+// setScreen switches tabs and returns whatever the new screen needs on
+// arrival. The Files screen is the only one with anything to fetch.
+func (m *Model) setScreen(s Screen) tea.Cmd {
+	if s < 0 || s >= numScreens {
+		return nil
+	}
+	m.screen = s
+	if s == ScreenFiles && !m.files.listed && m.active {
+		return m.conn.fileDirectory()
+	}
+	return nil
+}
+
+func (m *Model) pageSize() int {
+	return max(m.height-chromeTop-chromeBottom-2, 1)
+}
+
+func (m *Model) moveCursor(delta int) {
+	if m.follow && m.screen.follows() && delta != 0 {
+		m.follow = false
+	}
+	m.cursor[m.screen] += delta
+	m.clampScroll(m.rowCount(), m.visibleRows())
+}
+
+func (m *Model) jumpTo(row int) {
+	if m.follow && m.screen.follows() {
+		m.follow = false
+	}
+	m.cursor[m.screen] = row
+	m.clampScroll(m.rowCount(), m.visibleRows())
+}
+
+func (m *Model) scroll(delta int) {
+	if m.follow && m.screen.follows() {
+		m.follow = false
+	}
+	m.offset[m.screen] += delta
+	total, vis := m.rowCount(), m.visibleRows()
+	m.offset[m.screen] = min(max(m.offset[m.screen], 0), max(total-vis, 0))
+	cur := m.cursor[m.screen]
+	m.cursor[m.screen] = min(max(cur, m.offset[m.screen]), m.offset[m.screen]+max(vis-1, 0))
+	m.clampScroll(total, vis)
+}
+
+// visibleRows is how many data rows the body can draw, without running the
+// full layout (which would recurse through clampScroll).
+func (m *Model) visibleRows() int {
+	h := m.height - chromeTop - chromeBottom
+	if m.screen.isTable() {
+		h-- // the column header
+	}
+	return max(h, 0)
+}
+
+var sortOrder = []sortKey{sortPoint, sortType, sortValue, sortQuality, sortAge, sortTime}
+
+func (m *Model) cycleSort(dir int) {
+	at := 0
+	for i, k := range sortOrder {
+		if k == m.sortBy {
+			at = i
+			break
+		}
+	}
+	m.sortBy = sortOrder[(at+dir+len(sortOrder))%len(sortOrder)]
+	m.cursor[m.screen], m.offset[m.screen] = 0, 0
+	m.toast.show("info", "sort by "+sortName(m.sortBy), m.now)
+}
+
+func (m *Model) clearList() {
+	switch m.screen {
+	case ScreenPoints, ScreenOverview:
+		m.points = map[pointKey]*pointState{}
+		m.pointsOrder = nil
+		m.toast.show("info", "point table cleared", m.now)
+	case ScreenEvents:
+		m.events = nil
+		m.toast.show("info", "events cleared", m.now)
+	case ScreenLog:
+		m.logs = nil
+		m.toast.show("info", "log cleared", m.now)
+	case ScreenFiles:
+		m.files.clear()
+		m.toast.show("info", "file list cleared", m.now)
+	}
+	m.cursor[m.screen], m.offset[m.screen] = 0, 0
+}
+
+// contextAction is what enter, space and d do on the current row.
+func (m *Model) contextAction(key string) (tea.Model, tea.Cmd) {
+	if key == "d" {
+		if m.screen == ScreenPoints {
+			m.detail = !m.detail
+		}
+		return m, nil
+	}
+	switch m.screen {
+	case ScreenPoints:
+		// A command is not derived from the selected row: in 104 its address
+		// space is its own, so every parameter is entered in the dialog.
+		m.openCommandDialog()
+	case ScreenFiles:
+		return m.fetchSelectedFile()
+	}
+	return m, nil
+}
+
+func (m *Model) issueCommand(op commandOp) (tea.Model, tea.Cmd) {
+	m.cmdSent++
+	m.txASDU++
+	m.addLog("tx", op.describe())
+	m.beginCommand(op, m.now)
+	m.openCommandFeedback()
+	return m, m.conn.sendCommand(op)
+}
+
+func (m *Model) selectedPoint() (*pointState, bool) {
+	rows := m.visiblePoints()
+	i := m.cursor[ScreenPoints]
+	if i < 0 || i >= len(rows) {
+		return nil, false
+	}
+	return rows[i], true
+}
+
+// ---------- data in ----------
+
+func (m *Model) applyUpdate(u updateMsg) {
+	m.rxASDU++
+	m.rate[m.rateIdx]++
+	m.rxItems += uint64(len(u.rows))
+
+	if u.summary != "" {
+		m.addLog("rx", u.summary)
+	}
+	if u.feedback != nil {
+		m.applyCommandFeedback(*u.feedback, u.at)
+	}
+
+	for _, r := range u.rows {
+		p, ok := m.points[r.Key]
+		if !ok {
+			p = &pointState{Key: r.Key}
+			m.points[r.Key] = p
+			m.pointsOrder = append(m.pointsOrder, r.Key)
+		}
+		p.Type, p.Cause = r.Type, r.Cause
+		p.Value = r.Value
+		p.Qds, p.HasQds = r.Qds, r.HasQds
+		p.Stamp = r.Stamp
+		p.Updated = u.at
+		p.Updates++
+		if r.HasNum {
+			p.Num, p.HasNum = r.Num, true
+			p.Hist = append(p.Hist, r.Num)
+			if len(p.Hist) > histCap {
+				p.Hist = p.Hist[len(p.Hist)-histCap:]
+			}
+		}
+
+		if r.Cause == asdu.ReturnInfoRemote || r.Cause == asdu.ReturnInfoLocal {
+			m.noteReturnInfo(r.Key, r.Value, u.at)
+		}
+
+		m.events = append(m.events, eventRow{
+			At: u.at, Key: r.Key, Type: r.Type, Cause: r.Cause,
+			Value: r.Value, Qds: r.Qds, HasQ: r.HasQds, Stamp: r.Stamp,
+		})
+	}
+	if len(m.events) > maxEvents {
+		m.events = m.events[len(m.events)-maxEvents:]
+	}
+}
+
+func (m *Model) addLog(level, text string) {
+	at := m.now
+	if at.IsZero() {
+		at = time.Now()
+	}
+	m.logs = append(m.logs, logRow{At: at, Level: level, Text: text})
+	if len(m.logs) > maxLogs {
+		m.logs = m.logs[len(m.logs)-maxLogs:]
+	}
+}
+
+// eventRate is ASDUs per second over the last ten seconds.
+func (m *Model) eventRate() float64 {
+	total := 0
+	for _, n := range m.rate {
+		total += n
+	}
+	return float64(total) / (float64(len(m.rate)) * 0.5)
+}
+
+// ---------- filtering and sorting ----------
+
+func matchesFilter(filter string, fields ...string) bool {
+	if filter == "" {
+		return true
+	}
+	needle := strings.ToLower(filter)
+	for _, f := range fields {
+		if strings.Contains(strings.ToLower(f), needle) {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *Model) visiblePoints() []*pointState {
+	out := make([]*pointState, 0, len(m.pointsOrder))
+	for _, k := range m.pointsOrder {
+		p := m.points[k]
+		if p == nil {
+			continue
+		}
+		if !matchesFilter(m.filter, pointLabel(p.Key), typeName(p.Type),
+			p.Value, qualityText(p.Qds, p.HasQds), causeName(p.Cause)) {
+			continue
+		}
+		out = append(out, p)
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if m.sortDesc {
+			return pointLess(out[j], out[i], m.sortBy)
+		}
+		return pointLess(out[i], out[j], m.sortBy)
+	})
+	return out
+}
+
+func pointLess(a, b *pointState, key sortKey) bool {
+	switch key {
+	case sortType:
+		if a.Type != b.Type {
+			return a.Type < b.Type
+		}
+	case sortValue:
+		switch {
+		case a.HasNum && b.HasNum && a.Num != b.Num:
+			return a.Num < b.Num
+		case a.Value != b.Value:
+			return a.Value < b.Value
+		}
+	case sortQuality:
+		// Worst first: this is how you find the broken points in a device
+		// with a thousand good ones.
+		if qa, qb := qualityRank(a), qualityRank(b); qa != qb {
+			return qa > qb
+		}
+	case sortAge:
+		if !a.Updated.Equal(b.Updated) {
+			return a.Updated.After(b.Updated)
+		}
+	case sortTime:
+		if !a.Stamp.Equal(b.Stamp) {
+			return a.Stamp.After(b.Stamp)
+		}
+	}
+	if a.Key.CA != b.Key.CA {
+		return a.Key.CA < b.Key.CA
+	}
+	return a.Key.IOA < b.Key.IOA
+}
+
+// qualityRank scores a point's quality so the worst sorts first.
+func qualityRank(p *pointState) int {
+	if !p.HasQds {
+		return 0
+	}
+	n := 0
+	q := p.Qds
+	if q&asdu.QDSInvalid != 0 {
+		n += 16
+	}
+	if q&asdu.QDSNotTopical != 0 {
+		n += 8
+	}
+	if q&asdu.QDSSubstituted != 0 {
+		n += 4
+	}
+	if q&asdu.QDSBlocked != 0 {
+		n += 2
+	}
+	if q&asdu.QDSOverflow != 0 {
+		n++
+	}
+	return n
+}
+
+func (m *Model) visibleEvents() []eventRow {
+	if m.filter == "" {
+		return m.events
+	}
+	out := make([]eventRow, 0, len(m.events))
+	for _, e := range m.events {
+		if matchesFilter(m.filter, pointLabel(e.Key), typeName(e.Type), e.Value,
+			causeName(e.Cause), qualityText(e.Qds, e.HasQ)) {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+func (m *Model) visibleLogs() []logRow {
+	if m.filter == "" {
+		return m.logs
+	}
+	out := make([]logRow, 0, len(m.logs))
+	for _, l := range m.logs {
+		if matchesFilter(m.filter, l.Level, l.Text) {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
+func (m *Model) rowCount() int {
+	switch m.screen {
+	case ScreenPoints:
+		return len(m.visiblePoints())
+	case ScreenEvents:
+		return len(m.visibleEvents())
+	case ScreenLog:
+		return len(m.visibleLogs())
+	case ScreenFiles:
+		return m.files.rowCount()
+	case ScreenHelp:
+		return len(helpLines())
+	}
+	return 0
+}
+
+func (m *Model) rowNoun() string {
+	switch m.screen {
+	case ScreenPoints:
+		return "point"
+	case ScreenEvents:
+		return "event"
+	case ScreenLog:
+		return "line"
+	case ScreenFiles:
+		return "file"
+	}
+	return "row"
+}
+
+// ---------- prompt ----------
+
+type promptKind int
+
+const (
+	promptFilter promptKind = iota
+	promptRead
+)
+
+type promptState struct {
+	active bool
+	kind   promptKind
+	label  string
+	input  string
+}
+
+func (m *Model) closePrompt() { m.prompt = promptState{} }
+
+func (m *Model) handlePromptKey(key string) (tea.Model, tea.Cmd) {
+	p := m.prompt
+	switch key {
+	case "esc":
+		m.closePrompt()
+		if p.kind == promptFilter {
+			m.filter = ""
+		}
+		return m, nil
+	case "enter":
+		m.closePrompt()
+		return m.submitPrompt(p)
+	case "backspace":
+		if len(p.input) > 0 {
+			r := []rune(p.input)
+			m.prompt.input = string(r[:len(r)-1])
+		}
+	case "ctrl+u":
+		m.prompt.input = ""
+	case " ", "space":
+		m.prompt.input += " "
+	default:
+		if len([]rune(key)) == 1 {
+			m.prompt.input += key
+		}
+	}
+	// A filter applies as it is typed: the list is the feedback.
+	if m.prompt.kind == promptFilter {
+		m.filter = m.prompt.input
+		m.cursor[m.screen], m.offset[m.screen] = 0, 0
+	}
+	return m, nil
+}
+
+func (m *Model) submitPrompt(p promptState) (tea.Model, tea.Cmd) {
+	switch p.kind {
+	case promptFilter:
+		m.filter = strings.TrimSpace(p.input)
+		m.cursor[m.screen], m.offset[m.screen] = 0, 0
+
+	case promptRead:
+		ioa, err := parseUint(p.input, 24)
+		if err != nil {
+			m.toast.show("error", "read: "+err.Error(), m.now)
+			return m, nil
+		}
+		m.txASDU++
+		m.addLog("tx", fmt.Sprintf("read command (C_RD_NA_1) ioa=%d", ioa))
+		return m, m.conn.readCommand(asdu.InfoObjAddr(ioa))
+
+	}
+	return m, nil
+}
+
+// ---------- modal ----------
+
+type modalKind int
+
+const (
+	modalNone modalKind = iota
+	modalConfirm
+	modalReset
+	modalCmdFeedback
+)
+
+type modalChoice struct {
+	key   string
+	label string
+	// danger marks the choice that actually does something.
+	danger bool
+}
+
+type modalState struct {
+	kind    modalKind
+	title   string
+	lines   []string
+	choices []modalChoice
+	op      commandOp
+}
+
+func (m *Model) openResetDialog() {
+	m.modal = modalState{
+		kind:  modalReset,
+		title: "Reset process",
+		lines: []string{
+			"C_RP_NA_1 resets the outstation's process.",
+			"It is not a communications reset.",
+		},
+		choices: []modalChoice{
+			{key: "enter", label: "Send reset", danger: true},
+			{key: "esc", label: "Cancel"},
+		},
+	}
+}
+
+func (m *Model) handleModalKey(key string) (tea.Model, tea.Cmd) {
+	d := m.modal
+	if d.kind == modalCmdFeedback {
+		return m.handleFeedbackKey(key)
+	}
+	switch key {
+	case "esc", "q":
+		m.modal = modalState{}
+		return m, nil
+	}
+
+	switch d.kind {
+	case modalReset:
+		if key == "enter" {
+			m.modal = modalState{}
+			m.txASDU++
+			m.addLog("tx", "reset process (C_RP_NA_1)")
+			return m, m.conn.resetProcess()
+		}
+	case modalConfirm:
+		if key == "enter" {
+			m.modal = modalState{}
+			return m.issueCommand(d.op)
 		}
 	}
 	return m, nil
 }
 
-// --- key handling ---------------------------------------------------------
+// ---------- toast ----------
 
-func (m model) keyMain(k tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch k.String() {
-	case "q":
-		return m, tea.Quit
-	case "1":
-		m.tab = tabPoints
-		return m, nil
-	case "2":
-		m.tab = tabLog
-		return m, nil
-	case "3":
-		m.tab = tabSend
-		return m, nil
-	case "tab":
-		m.tab = (m.tab + 1) % 3
-		return m, nil
-	case "shift+tab":
-		m.tab = (m.tab + 2) % 3
-		return m, nil
-	case "e":
-		m.connAddr.SetValue(m.addr)
-		m.connCA.SetValue(strconv.FormatUint(uint64(m.ca), 10))
-		m.connField = 0
-		m.focus = focusAddr
-		(&m).connSyncFocus()
-		return m, textinput.Blink
-	case "c":
-		(&m).connect()
-		return m, nil
-	case "x":
-		(&m).disconnect()
-		return m, nil
-	case "v":
-		m.verbose = !m.verbose
-		if m.client != nil {
-			m.client.LogMode(m.verbose)
-		}
-		(&m).appendLog(fmt.Sprintf("[app] protocol logging %v", m.verbose))
-		return m, nil
-	case "s":
-		if m.client != nil {
-			m.client.SendStartDt()
-			(&m).appendLog("[tx] STARTDT act -> sent")
-		} else {
-			(&m).appendLog("[app] not connected")
-		}
-		return m, nil
-	case "S":
-		if m.client != nil {
-			m.client.SendStopDt()
-			(&m).appendLog("[tx] STOPDT act -> sent")
-		} else {
-			(&m).appendLog("[app] not connected")
-		}
-		return m, nil
-	case "g":
-		(&m).actGeneralInterrogation()
-		return m, nil
-	case "C":
-		(&m).actCounterInterrogation()
-		return m, nil
-	case "y":
-		(&m).actClockSync()
-		return m, nil
-	case "t":
-		(&m).actTest()
-		return m, nil
-	case "z":
-		(&m).actReset()
-		return m, nil
-	case "ctrl+l":
-		m.logs = nil
-		m.logView.SetContent("")
-		return m, nil
-	case "ctrl+r":
-		m.points = map[uint]point{}
-		(&m).refreshPointRows()
-		return m, nil
-	case "i":
-		if m.tab == tabSend {
-			m.focus = focusForm
-			m.formField = 0
-			(&m).formSyncFocus()
-			return m, textinput.Blink
-		}
-	}
-
-	// delegate navigation to the focused component
-	var cmd tea.Cmd
-	switch m.tab {
-	case tabPoints:
-		m.table, cmd = m.table.Update(k)
-	case tabLog:
-		m.logView, cmd = m.logView.Update(k)
-	}
-	return m, cmd
+type toastState struct {
+	level string
+	text  string
+	until time.Time
 }
 
-func (m model) keyAddr(k tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch k.String() {
-	case "esc":
-		m.focus = focusMain
-		m.connAddr.Blur()
-		m.connCA.Blur()
-		return m, nil
-	case "enter":
-		m.addr = strings.TrimSpace(m.connAddr.Value())
-		if v, err := strconv.ParseUint(strings.TrimSpace(m.connCA.Value()), 10, 16); err == nil {
-			m.ca = uint16(v)
-		}
-		m.focus = focusMain
-		m.connAddr.Blur()
-		m.connCA.Blur()
-		(&m).appendLog(fmt.Sprintf("[app] target set: %s common addr %d", m.addr, m.ca))
-		return m, nil
-	case "tab", "down":
-		m.connField = (m.connField + 1) % 2
-		(&m).connSyncFocus()
-		return m, textinput.Blink
-	case "shift+tab", "up":
-		m.connField = (m.connField + 1) % 2
-		(&m).connSyncFocus()
-		return m, textinput.Blink
-	}
-	var cmd tea.Cmd
-	if m.connField == 0 {
-		m.connAddr, cmd = m.connAddr.Update(k)
-	} else {
-		m.connCA, cmd = m.connCA.Update(k)
-	}
-	return m, cmd
+func (t *toastState) show(level, text string, now time.Time) {
+	t.level, t.text = level, text
+	t.until = now.Add(4 * time.Second)
 }
 
-func (m model) keyForm(k tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch k.String() {
-	case "esc":
-		m.focus = focusMain
-		(&m).blurForm()
-		return m, nil
-	case "enter":
-		(&m).sendForm()
-		return m, nil
-	case "tab", "down":
-		m.formField = (m.formField + 1) % 5
-		(&m).formSyncFocus()
-		return m, textinput.Blink
-	case "shift+tab", "up":
-		m.formField = (m.formField + 4) % 5
-		(&m).formSyncFocus()
-		return m, textinput.Blink
-	case "left":
-		if m.formField == 0 {
-			m.formKind = (m.formKind + len(cmdKinds) - 1) % len(cmdKinds)
-			return m, nil
-		}
-		if m.formField == 3 {
-			m.formSelect = !m.formSelect
-			return m, nil
-		}
-	case "right":
-		if m.formField == 0 {
-			m.formKind = (m.formKind + 1) % len(cmdKinds)
-			return m, nil
-		}
-		if m.formField == 3 {
-			m.formSelect = !m.formSelect
-			return m, nil
-		}
-	}
-	var cmd tea.Cmd
-	switch m.formField {
-	case 1:
-		m.inIOA, cmd = m.inIOA.Update(k)
-	case 2:
-		m.inVal, cmd = m.inVal.Update(k)
-	case 4:
-		m.inQual, cmd = m.inQual.Update(k)
-	}
-	return m, cmd
-}
-
-// --- client lifecycle ------------------------------------------------------
-
-func (m *model) connect() {
-	if m.client != nil {
-		m.disconnect()
-	}
-	opt := cs104.NewOption()
-	if err := opt.AddRemoteServer(m.addr); err != nil {
-		m.appendLog("[err] bad server address: " + err.Error())
-		return
-	}
-	opt.SetAutoReconnect(false)
-
-	cli := cs104.NewClient(&tuiHandler{b: m.bridge}, opt)
-	cli.SetLogProvider(&logProvider{b: m.bridge})
-	cli.LogMode(m.verbose)
-
-	b := m.bridge
-	cli.SetOnConnectHandler(func(c *cs104.Client) {
-		b.send(statusMsg{connected: true, note: "TCP connected, sending STARTDT"})
-		c.SendStartDt()
-	})
-	cli.SetOnActivatedHandler(func(*cs104.Client) {
-		b.send(statusMsg{connected: true, active: true, note: "data transfer active (STARTDT confirmed)"})
-	})
-	cli.SetOnDeactivatedHandler(func(*cs104.Client) {
-		b.send(statusMsg{connected: true, active: false, note: "data transfer stopped (STOPDT confirmed)"})
-	})
-	cli.SetConnectionLostHandler(func(*cs104.Client) {
-		b.send(statusMsg{connected: false, active: false, note: "connection lost"})
-	})
-	cli.SetConnectTimeoutHandler(func(*cs104.Client) {
-		b.send(logMsg{"[app] connect attempt timed out"})
-	})
-
-	m.client = cli
-	m.appendLog("[app] connecting to " + m.addr)
-	if err := cli.Start(); err != nil {
-		m.appendLog("[err] start failed: " + err.Error())
-		m.client = nil
+func (t *toastState) expire(now time.Time) {
+	if !t.until.IsZero() && now.After(t.until) {
+		t.text = ""
 	}
 }
 
-func (m *model) disconnect() {
-	if m.client == nil {
-		return
-	}
-	_ = m.client.Close()
-	m.client = nil
-	m.connected, m.active = false, false
-	m.appendLog("[app] disconnected")
+func (t toastState) active() bool { return t.text != "" }
+
+// ---------- naming ----------
+
+func pointLabel(k pointKey) string {
+	return fmt.Sprintf("%d:%d", k.CA, k.IOA)
 }
 
-// --- request actions -------------------------------------------------------
-
-func (m *model) requireActive() bool {
-	if m.client == nil || !m.active {
-		m.appendLog("[app] not connected/active — press 'c' to connect first")
-		return false
-	}
-	return true
+// typeName renders an ASDU type identification without the TID<> wrapper.
+func typeName(t asdu.TypeID) string {
+	s := t.String()
+	s = strings.TrimPrefix(s, "TID<")
+	return strings.TrimSuffix(s, ">")
 }
 
-func (m *model) logAct(name string, err error) {
-	if err != nil {
-		m.appendLog("[tx] " + name + " failed: " + err.Error())
-	} else {
-		m.appendLog("[tx] " + name + " -> sent")
-	}
+func causeName(c asdu.Cause) string {
+	s := asdu.CauseOfTransmission{Cause: c}.String()
+	s = strings.TrimPrefix(s, "COT<")
+	return strings.TrimSuffix(s, ">")
 }
 
-func (m *model) actGeneralInterrogation() {
-	if !m.requireActive() {
-		return
+// qualityText names the set quality bits, or "GOOD" when none are.
+func qualityText(q asdu.QualityDescriptor, has bool) string {
+	if !has {
+		return "—"
 	}
-	err := m.client.InterrogationCmd(asdu.CauseOfTransmission{Cause: asdu.Activation}, asdu.CommonAddr(m.ca), asdu.QOIStation)
-	m.logAct("general interrogation", err)
+	if q == asdu.QDSGood {
+		return "GOOD"
+	}
+	var parts []string
+	if q&asdu.QDSOverflow != 0 {
+		parts = append(parts, "OV")
+	}
+	if q&asdu.QDSBlocked != 0 {
+		parts = append(parts, "BL")
+	}
+	if q&asdu.QDSSubstituted != 0 {
+		parts = append(parts, "SB")
+	}
+	if q&asdu.QDSNotTopical != 0 {
+		parts = append(parts, "NT")
+	}
+	if q&asdu.QDSInvalid != 0 {
+		parts = append(parts, "IV")
+	}
+	if len(parts) == 0 {
+		return fmt.Sprintf("0x%02x", byte(q))
+	}
+	return strings.Join(parts, "|")
 }
 
-func (m *model) actCounterInterrogation() {
-	if !m.requireActive() {
-		return
+func sortName(k sortKey) string {
+	switch k {
+	case sortPoint:
+		return "address"
+	case sortType:
+		return "type"
+	case sortValue:
+		return "value"
+	case sortQuality:
+		return "quality (worst first)"
+	case sortAge:
+		return "age"
+	case sortTime:
+		return "timestamp"
 	}
-	err := m.client.CounterInterrogationCmd(asdu.CauseOfTransmission{Cause: asdu.Activation}, asdu.CommonAddr(m.ca),
-		asdu.QualifierCountCall{Request: asdu.QCCTotal, Freeze: asdu.QCCFrzRead})
-	m.logAct("counter interrogation", err)
+	return "none"
 }
 
-func (m *model) actClockSync() {
-	if !m.requireActive() {
-		return
+func commandMode(sbo bool) string {
+	if sbo {
+		return "select before execute"
 	}
-	err := m.client.ClockSynchronizationCmd(asdu.CauseOfTransmission{Cause: asdu.Activation}, asdu.CommonAddr(m.ca), time.Now())
-	m.logAct("clock synchronization", err)
+	return "direct execute"
 }
 
-func (m *model) actTest() {
-	if !m.requireActive() {
-		return
+func qocName(q asdu.QOCQual) string {
+	switch q {
+	case asdu.QOCNoAdditionalDefinition:
+		return "no pulse definition"
+	case asdu.QOCShortPulseDuration:
+		return "short pulse"
+	case asdu.QOCLongPulseDuration:
+		return "long pulse"
+	case asdu.QOCPersistentOutput:
+		return "persistent"
 	}
-	err := m.client.TestCommand(asdu.CauseOfTransmission{Cause: asdu.Activation}, asdu.CommonAddr(m.ca))
-	m.logAct("test command", err)
+	return fmt.Sprintf("qoc %d", byte(q))
 }
 
-func (m *model) actReset() {
-	if !m.requireActive() {
-		return
+func onOff(v bool) string {
+	if v {
+		return "on"
 	}
-	err := m.client.ResetProcessCmd(asdu.CauseOfTransmission{Cause: asdu.Activation}, asdu.CommonAddr(m.ca), asdu.QPRGeneralRest)
-	m.logAct("reset process", err)
+	return "off"
 }
 
-// --- state helpers ---------------------------------------------------------
-
-func (m *model) appendLog(line string) {
-	m.logs = append(m.logs, time.Now().Format("15:04:05.000")+" "+line)
-	if len(m.logs) > maxLogLines {
-		m.logs = m.logs[len(m.logs)-maxLogLines:]
+func plural(n int, noun string) string {
+	if n == 1 {
+		return fmt.Sprintf("%d %s", n, noun)
 	}
-	m.logView.SetContent(strings.Join(m.logs, "\n"))
-	m.logView.GotoBottom()
+	return fmt.Sprintf("%d %ss", n, noun)
 }
 
-func (m *model) applyPoints(pts []point) {
-	for _, p := range pts {
-		if old, ok := m.points[p.IOA]; ok {
-			p.Count = old.Count + 1
-		} else {
-			p.Count = 1
-		}
-		m.points[p.IOA] = p
+// qoiGroup is the interrogation qualifier the toolbar sends: station
+// interrogation, which is what an operator means by "read everything".
+func (m *Model) qoiGroup() asdu.QualifierOfInterrogation { return asdu.QOIStation }
+
+func fmtDuration(d time.Duration) string {
+	if d < 0 {
+		d = 0
 	}
-	m.refreshPointRows()
+	h := int(d.Hours())
+	mnt := int(d.Minutes()) % 60
+	s := int(d.Seconds()) % 60
+	if h > 0 {
+		return fmt.Sprintf("%d:%02d:%02d", h, mnt, s)
+	}
+	return fmt.Sprintf("%d:%02d", mnt, s)
 }
 
-func (m *model) refreshPointRows() {
-	keys := make([]uint, 0, len(m.points))
-	for k := range m.points {
-		keys = append(keys, k)
+func fmtAge(d time.Duration) string {
+	switch {
+	case d < 0:
+		return "0s"
+	case d < time.Minute:
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	default:
+		return fmt.Sprintf("%dh", int(d.Hours()))
 	}
-	sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
-	rows := make([]table.Row, 0, len(keys))
-	for _, k := range keys {
-		p := m.points[k]
-		rows = append(rows, table.Row{
-			strconv.FormatUint(uint64(p.IOA), 10), p.Type, p.Value, p.Quality, p.Cause, p.Time,
-			strconv.Itoa(p.Count),
-		})
-	}
-	m.table.SetRows(rows)
-}
-
-func (m *model) connSyncFocus() {
-	m.connAddr.Blur()
-	m.connCA.Blur()
-	if m.connField == 0 {
-		m.connAddr.Focus()
-	} else {
-		m.connCA.Focus()
-	}
-}
-
-func (m *model) formSyncFocus() {
-	m.blurForm()
-	switch m.formField {
-	case 1:
-		m.inIOA.Focus()
-	case 2:
-		m.inVal.Focus()
-	case 4:
-		m.inQual.Focus()
-	}
-}
-
-func (m *model) blurForm() {
-	m.inIOA.Blur()
-	m.inVal.Blur()
-	m.inQual.Blur()
-}
-
-func (m *model) layout() {
-	if m.width <= 0 || m.height <= 0 {
-		return
-	}
-	inner := m.width - 2
-	if inner < 20 {
-		inner = 20
-	}
-	bodyH := m.height - 6
-	if bodyH < 3 {
-		bodyH = 3
-	}
-	m.table.SetWidth(inner)
-	m.table.SetHeight(bodyH - 1)
-	m.logView.Width = inner
-	m.logView.Height = bodyH
-	m.logView.SetContent(strings.Join(m.logs, "\n"))
-	m.logView.GotoBottom()
 }

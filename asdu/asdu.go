@@ -632,8 +632,35 @@ func (sf *ASDU) UnmarshalBinary(rawAsdu []byte) error {
 // and getters/SendReplyMirror can be used in any order and repeatedly.
 func (sf *ASDU) restoreInfoObj(saved []byte) { sf.InfoObj = saved }
 
+// variableInfoObjSize returns the size of an information object whose length
+// is not fixed by the type identification, and whether this type is such a
+// case. The compatible range defines one: F_SG_NA_1 (segment), whose length
+// is carried in its own LOS (length of segment) octet.
+func (sf *ASDU) variableInfoObjSize() (int, bool) {
+	if sf.Type != F_SG_NA_1 {
+		return 0, false
+	}
+	// IOA + NOF(2) + NOS(1) + LOS(1) + segment data(LOS)
+	headSize := sf.InfoObjAddrSize + 4
+	if len(sf.InfoObj) < headSize {
+		return 0, true // recognized, but truncated: reported as io.EOF
+	}
+	return headSize + int(sf.InfoObj[sf.InfoObjAddrSize+3]), true
+}
+
 // FixInfoObjSize fix information object size
 func (sf *ASDU) FixInfoObjSize() error {
+	// types whose element size is carried in the payload itself
+	if size, isVariable := sf.variableInfoObjSize(); isVariable {
+		switch {
+		case size == 0 || size > len(sf.InfoObj):
+			return io.EOF
+		case size < len(sf.InfoObj): // not explicitly prohibited
+			sf.InfoObj = sf.InfoObj[:size]
+		}
+		return nil
+	}
+
 	// fixed element size
 	objSize, err := GetInfoObjSize(sf.Type)
 	if err != nil {

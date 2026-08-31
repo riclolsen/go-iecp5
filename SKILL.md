@@ -269,6 +269,41 @@ scale); ASDU 5 → `IdentificationHandler`; ASDU 8 → `GITerminationHandler`;
 rest → `ASDUHandler`. The device is identified by `a.CommonAddr`.
 Not implemented: generic services codecs, disturbance data, device side.
 
+## Recipe: file transfer (fetching disturbance records)
+
+File transfer ASDUs arrive at the generic `ASDUHandler`. Delegate them to a
+`filetransfer.Receiver` (master) or `Sender` (outstation); the procedure —
+select, sectioning, segmentation, per-section checksum, retry — runs itself.
+
+```go
+// master
+receiver := filetransfer.NewReceiver(nil) // or a Store to persist files
+receiver.SetFileHandler(func(e filetransfer.Entry, data []byte) { save(data) })
+receiver.SetDirectoryHandler(func(ca asdu.CommonAddr, d []asdu.DirectoryInfo) { list(d) })
+
+func (h *myHandler) ASDUHandler(c asdu.Connect, a *asdu.ASDU, _ *cs104.Server, _ int) error {
+	if handled, _ := receiver.Handle(c, a); handled {
+		return nil
+	}
+	... // your own types
+	return nil
+}
+
+_ = receiver.RequestDirectory(client, 1)
+_ = receiver.RequestFile(client, 1, 100, asdu.FileDisturbanceData)
+
+// outstation
+store := filetransfer.NewMemStore()
+_ = store.Write(100, asdu.FileDisturbanceData, record)
+sender := filetransfer.NewSender(store)   // delegate the same way in ASDUHandler
+_ = sender.Offer(conn, 1, 100, asdu.FileDisturbanceData) // optional announcement
+```
+
+Files are addressed by (IOA, name of file); `asdu.FileDisturbanceData` and
+friends are the predefined names. Implement `filetransfer.Store` to back
+transfers with disk or a database. Transfers are round-trip heavy — see the
+throughput note in `docs/cs104.md`.
+
 ## Cause-of-transmission cheat sheet
 
 | Situation | COT to use |
@@ -321,7 +356,10 @@ Not implemented: generic services codecs, disturbance data, device side.
 11. Select-before-execute is application-level: check
     `cmd.Qoc.InSelect` / `Qos.InSelect` and confirm without operating when
     it's a select.
-12. File transfer (F_*) and IEC 62351-5 (S_*) types are not implemented.
+12. File transfer works in the **monitor direction only** (outstation →
+    master) via the `filetransfer` package; the control direction,
+    `F_SC_NB_1` <127>, IEC 62351-5 (S_*) types and the 103 disturbance data
+    service are not implemented.
 
 ## Verification without hardware
 
