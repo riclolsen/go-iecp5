@@ -619,7 +619,7 @@ func (m *Model) viewPoints(l layout) []string {
 		r.cells[colType] = shortType(p.Type)
 		r.cells[colValue] = p.Value
 		r.cells[colTrend] = sparkline(p.Hist, 12)
-		r.cells[colQuality] = qualityText(p.Qds, p.HasQds)
+		r.cells[colQuality] = qualityTextKind(p.Qds, p.HasQds, p.IsQdp)
 		r.cells[colCause] = causeName(p.Cause)
 		r.cells[colAge] = fmtAge(now.Sub(p.Updated))
 		if !p.Stamp.IsZero() {

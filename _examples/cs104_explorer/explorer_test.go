@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -105,7 +106,7 @@ func TestDemoSessionActivatesAndReportsPoints(t *testing.T) {
 	m.width, m.height = 120, 30
 }
 
-func TestCommandRoundTrip(t *testing.T) {
+func TestCommandDialogRoundTrip(t *testing.T) {
 	m, stop := newTestModel(t)
 	defer stop()
 
@@ -117,82 +118,151 @@ func TestCommandRoundTrip(t *testing.T) {
 		t.Fatal("the interrogation reply never included the command point")
 	}
 
-	// Select the single-point command point and turn it on, with the
-	// confirmation dialog in the way.
+	// The dialog opens from anywhere and takes nothing from the cursor: the
+	// row selected here is deliberately not the one the command addresses.
 	m.screen = ScreenPoints
-	if !selectPoint(m, demoCmdSingle) {
-		t.Fatalf("command point %d not in the table", demoCmdSingle)
-	}
-	m.sbo = false // direct execute, so one command completes the round trip
-
+	m.cursor[ScreenPoints] = 0
 	m.HandleKey("o")
-	if m.modal.kind == modalNone {
-		t.Fatal("a command must open a confirmation dialog")
+	if !m.cmd.active {
+		t.Fatal("o must open the command dialog")
 	}
-	if !strings.Contains(strings.Join(m.modal.lines, " "), "single command ON") {
-		t.Fatalf("the dialog must name what will be sent: %v", m.modal.lines)
+	if m.cmd.ioa != "" {
+		t.Fatalf("the dialog must not guess an address from the table, got %q", m.cmd.ioa)
+	}
+
+	// Type the command: single command, ON, direct execute.
+	typeInto(m, cfIOA, fmt.Sprint(demoCmdSingle))
+	focusField(m, cfValue)
+	m.HandleKey("right") // OFF -> ON
+	focusField(m, cfMode)
+	if m.cmd.sbo {
+		m.HandleKey("right") // select+execute -> direct execute
+	}
+	if m.cmd.sbo {
+		t.Fatal("the mode field must toggle to direct execute")
+	}
+
+	m.HandleKey("enter")
+	if m.cmd.active {
+		t.Fatalf("a valid command must leave the dialog: %q", m.cmd.err)
+	}
+	if m.modal.kind != modalConfirm {
+		t.Fatal("a command must be confirmed before it is sent")
+	}
+	joined := strings.Join(m.modal.lines, " ")
+	for _, want := range []string{"C_SC_NA_1", fmt.Sprint(demoCmdSingle), "ON", "execute"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("the dialog must name %q: %v", want, m.modal.lines)
+		}
 	}
 
 	_, cmd := m.HandleKey("enter")
-	if cmd == nil {
-		t.Fatal("confirming must produce a command")
+	runCmd(t, m, cmd)
+
+	// Sending opens the feedback dialog, and the outstation's confirmations
+	// arrive in it.
+	if m.modal.kind != modalCmdFeedback {
+		t.Fatal("sending must show the command feedback")
 	}
-	if msg := cmd(); msg != nil {
-		m.Update(msg)
+	if !pump(t, m, func() bool { return m.track.phase == cmdPhaseDone }, 10*time.Second) {
+		t.Fatalf("the command never completed: phase %v, events %+v",
+			m.track.phase, m.track.events)
+	}
+	var steps []string
+	for _, e := range m.track.events {
+		steps = append(steps, e.text)
+	}
+	for _, want := range []string{"execute sent", "activation confirmed", "terminated"} {
+		if !strings.Contains(strings.Join(steps, " | "), want) {
+			t.Fatalf("the feedback must record %q: %s", want, strings.Join(steps, " | "))
+		}
 	}
 
-	// The outstation echoes the new state as return information.
+	// And the outstation reports the point it moved.
 	if !pump(t, m, func() bool {
 		p, ok := m.points[pointKey{CA: 1, IOA: demoCmdSingle}]
 		return ok && p.Value == "ON" && p.Cause == asdu.ReturnInfoRemote
 	}, 10*time.Second) {
-		p := m.points[pointKey{CA: 1, IOA: demoCmdSingle}]
-		t.Fatalf("command was not reflected back: %+v", p)
+		t.Fatalf("command was not reflected back: %+v", m.points[pointKey{CA: 1, IOA: demoCmdSingle}])
 	}
 	if m.cmdSent == 0 {
 		t.Fatal("the command counter did not move")
 	}
 }
 
-func TestSetpointPromptAndCancel(t *testing.T) {
+func TestSelectBeforeExecute(t *testing.T) {
 	m, stop := newTestModel(t)
 	defer stop()
 	if !pump(t, m, func() bool { return m.active }, 10*time.Second) {
 		t.Fatal("never became active")
 	}
-	press(t, m, "i")
-	if !pump(t, m, func() bool { return hasPoint(m, demoCmdSetpt) }, 10*time.Second) {
-		t.Fatal("the interrogation reply never included the setpoint point")
+
+	m.HandleKey("o")
+	typeInto(m, cfIOA, fmt.Sprint(demoCmdSingle))
+	focusField(m, cfMode)
+	if !m.cmd.sbo {
+		m.HandleKey("right")
+	}
+	m.HandleKey("enter") // validate -> confirm dialog
+
+	joined := strings.Join(m.modal.lines, " ")
+	if !strings.Contains(joined, "SELECT only") {
+		t.Fatalf("the confirmation must say this is only the select: %v", m.modal.lines)
+	}
+	_, cmd := m.HandleKey("enter")
+	runCmd(t, m, cmd)
+
+	// The select is confirmed and the execute waits for the operator.
+	if !pump(t, m, func() bool { return m.track.phase == cmdPhaseSelectConfirmed },
+		10*time.Second) {
+		t.Fatalf("the select was never confirmed: phase %v", m.track.phase)
+	}
+	sentAfterSelect := m.cmdSent
+
+	_, cmd = m.HandleKey("enter") // execute
+	runCmd(t, m, cmd)
+	if m.cmdSent != sentAfterSelect+1 {
+		t.Fatal("the execute must be a second transmission")
+	}
+	if !pump(t, m, func() bool { return m.track.phase == cmdPhaseDone }, 10*time.Second) {
+		t.Fatalf("the execute never completed: phase %v", m.track.phase)
+	}
+}
+
+func TestCommandDialogValidates(t *testing.T) {
+	m, stop := newTestModel(t)
+	defer stop()
+
+	m.HandleKey("o")
+	if !m.cmd.active {
+		t.Fatal("o must open the command dialog")
 	}
 
-	m.screen = ScreenPoints
-	if !selectPoint(m, demoCmdSetpt) {
-		t.Fatalf("setpoint point %d not in the table", demoCmdSetpt)
-	}
-	m.sbo = false
-
-	m.HandleKey("b")
-	if !m.prompt.active {
-		t.Fatal("b must open the setpoint prompt")
-	}
-	for _, k := range []string{"4", "2", ".", "5", "f"} {
-		m.HandleKey(k)
-	}
-	if m.prompt.input != "42.5f" {
-		t.Fatalf("prompt input = %q", m.prompt.input)
-	}
+	// An empty address is refused, and the cursor lands on the field.
 	m.HandleKey("enter")
-	if m.modal.kind == modalNone {
-		t.Fatal("a setpoint must be confirmed before it is sent")
+	if !m.cmd.active || m.cmd.err == "" {
+		t.Fatal("an empty information object address must be refused")
 	}
-	if !strings.Contains(strings.Join(m.modal.lines, " "), "42.5") {
-		t.Fatalf("the dialog must name the value: %v", m.modal.lines)
+	if m.cmd.visible()[m.cmd.cursor] != cfIOA {
+		t.Fatal("the cursor must move to the field that failed")
 	}
 
-	// Cancelling must send nothing.
+	// A set-point takes a typed value, and a bad one is refused.
+	focusField(m, cfType)
+	for m.cmd.spec().id != asdu.C_SE_NC_1 {
+		m.HandleKey("right")
+	}
+	typeInto(m, cfIOA, "6200")
+	typeInto(m, cfValue, "not-a-number")
+	m.HandleKey("enter")
+	if !m.cmd.active || !strings.Contains(m.cmd.err, "value") {
+		t.Fatalf("a bad set-point value must be refused, got %q", m.cmd.err)
+	}
+
+	// Cancelling sends nothing.
 	before := m.cmdSent
 	m.HandleKey("esc")
-	if m.modal.kind != modalNone {
+	if m.cmd.active {
 		t.Fatal("esc must close the dialog")
 	}
 	if m.cmdSent != before {
@@ -346,11 +416,15 @@ func TestMouseResolvesToKeys(t *testing.T) {
 		t.Fatalf("cursor = %d, want %d", m.cursor[ScreenPoints], l.offset+2)
 	}
 	m.HandleMouse(mouseEvent{x: 2, y: l.rows.y + 2, button: tea.MouseButtonLeft})
-	if m.modal.kind == modalNone && !m.prompt.active {
-		t.Fatal("clicking a selected point must open its command dialog")
+	if !m.cmd.active {
+		t.Fatal("clicking a selected row must open the command dialog")
+	}
+	// The dialog takes nothing from the row that was clicked: a command in
+	// 104 has its own address.
+	if m.cmd.ioa != "" {
+		t.Fatalf("the dialog must not prefill an address from the table, got %q", m.cmd.ioa)
 	}
 	m.HandleKey("esc")
-	m.closePrompt()
 
 	// Right-clicking a point opens the inspector.
 	m.HandleMouse(mouseEvent{x: 2, y: l.rows.y + 1, button: tea.MouseButtonRight})
@@ -494,6 +568,25 @@ func runCmd(t *testing.T, m *Model, cmd tea.Cmd) {
 	}
 	if msg := cmd(); msg != nil {
 		m.Update(msg)
+	}
+}
+
+// focusField moves the dialog cursor to a named field.
+func focusField(m *Model, id cmdFieldID) {
+	for i, v := range m.cmd.visible() {
+		if v == id {
+			m.cmd.cursor = i
+			return
+		}
+	}
+}
+
+// typeInto clears a text field and types a value into it.
+func typeInto(m *Model, id cmdFieldID, text string) {
+	focusField(m, id)
+	m.HandleKey("ctrl+u")
+	for _, r := range text {
+		m.HandleKey(string(r))
 	}
 }
 

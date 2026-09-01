@@ -538,7 +538,9 @@ func (m *Model) handleFeedbackKey(key string) (tea.Model, tea.Cmd) {
 		}
 		m.modal = modalState{}
 		return m, nil
-	case "r":
+	case "r", "o":
+		// "o" is the key that opens the dialog everywhere else, so it opens
+		// it from here too rather than being swallowed by the modal.
 		m.modal = modalState{}
 		m.openCommandDialog()
 		return m, nil

@@ -21,12 +21,12 @@ import (
 type valueKind int
 
 const (
-	valOnOff valueKind = iota // single and double commands
-	valStep                   // regulating step: lower / higher
-	valNormal                 // normalised, -1..1
-	valScaled                 // scaled, int16
-	valFloat                  // short float
-	valBits                   // 32 bit string
+	valOnOff  valueKind = iota // single and double commands
+	valStep                    // regulating step: lower / higher
+	valNormal                  // normalised, -1..1
+	valScaled                  // scaled, int16
+	valFloat                   // short float
+	valBits                    // 32 bit string
 )
 
 // qualKind is which qualifier a command carries.

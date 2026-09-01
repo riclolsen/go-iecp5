@@ -19,8 +19,8 @@ cs104-explorer  demo (in-process outstation)  ● active            up 0:31  1.5
  1:403      M_ME_NC             0.42 ▄▄▄▄▄▄▄▄▄▄▄▄ SB          Periodic            0s —
  1:700      M_IT_NA            10427 ▁▂▃▄▄▅▆▆▇███ GOOD        Spontaneous         0s —
 ──────────────────────────────────────────────────────────────────────────────────────────
- [i GI] [s Read] [/ Filter] [d Inspect] [c Off] [o On] [b Setpoint] [E Select+Execute]
- ↑↓ move · enter command · d inspect · / filter · < > r sort · b setpoint · e export
+ [i GI] [s Read] [/ Filter] [d Inspect] [o Command] [O Feedback] [E Select+Execute]
+ ↑↓ move · o command · O feedback · d inspect · / filter · < > r sort · e export
 ```
 
 ```console
@@ -111,13 +111,12 @@ arrived under.
 | `1`–`6`, `tab` | switch screens |
 | `↑` `↓`, `j` `k` | move the cursor; `pgup`/`pgdn` by a page |
 | `enter` | act on the selected row — the command dialog, or fetch a file |
+| `o` / `O` | the command dialog / the feedback for the last command |
 | `a` / `A` | STARTDT / STOPDT — start and stop data transfer |
 | `i` / `p` | general interrogation / counter interrogation |
 | `t` / `T` | clock synchronisation / test command |
 | `R` | reset process |
 | `s` | read command for one information object address |
-| `c` / `o` | off / on — single or double command on the selected point |
-| `b` | setpoint on the selected point |
 | `E` | switch between select-before-execute and direct execute |
 | `C` | edit the connection and reconnect in place |
 | `/`, `esc` | filter the list; clear the filter |
@@ -131,9 +130,9 @@ arrived under.
 | `?` | the full reference |
 | `q` | quit |
 
-The setpoint prompt reads the variation from the value: `12.5f` is a short
-float, `300s` a scaled value, `0.5n` a normalised one and `0xffb` a bitstring.
-One field says both what to send and how.
+In the command dialog `←` `→` change the type identification, the value of a
+single, double or step command, the pulse qualifier and the command mode;
+everything else is typed.
 
 ## Mouse
 
@@ -144,18 +143,63 @@ wheel, and drag the scrollbar. `-mouse=false` turns it off.
 Every click resolves to the key the keyboard would have pressed, so the two
 can never drift apart.
 
-## Commands are deliberate
+## Commands: every parameter, entered
 
-Commands are the reason to be careful, so the tool is.
+**In IEC 60870-5-104 a command is not attached to a monitored object.** Its
+information object address lives in its own address space, and nothing says
+the command that operates the single point at IOA 1001 is itself at 1001 —
+on the sample outstation in this repository it is at 9001. A tool that
+operates "the selected row" is guessing which plant item moves.
 
-`enter` on a point opens a dialog naming exactly what will be sent,
-**select-before-execute by default**, with a confirmation before anything
-moves. The select is the outstation's chance to refuse before plant moves.
+So `o` opens a dialog and every parameter is entered there:
 
-`-direct` and `-no-confirm` turn that off for the devices and situations that
-need it. While `-no-confirm` is in effect **the toolbar says so** — it is the
-one mode where no dialog appears to say it for itself.
+```
+ ╭─ Send command ─────────────────────────────────────────────╮
+ │ ▸ Type identification                                      │
+ │   ‹ C_SC_NA_1  single command ›                            │
+ │   Common address (ASDU)                                    │
+ │   1                              the station, 1..65534     │
+ │   Information object address                               │
+ │   9001                           the command's own address │
+ │   Value                                                    │
+ │   ‹ ON ›                         ← → to change             │
+ │   Qualifier of command                                     │
+ │   ‹ short pulse ›                pulse duration            │
+ │   Command mode                                             │
+ │   ‹ select, then execute ›       the S/E bit               │
+ ╰────────────────────────────────────────────────────────────╯
+```
 
+The dialog keeps what was entered last, so adjusting or repeating a command
+does not mean typing it again.
+
+**Feedback is shown, not assumed.** Sending opens a timeline that fills in as
+the outstation answers, and `O` reopens it afterwards:
+
+```
+ ╭─ Command ──────────────────────────────────────────────────╮
+ │ C_SC_NA_1 ca=1 ioa=9001 ON (execute, short pulse)          │
+ │ state  complete                                            │
+ │ 18:41:02.114  execute sent: C_SC_NA_1 ca=1 ioa=9001 ON     │
+ │ 18:41:02.220  activation confirmed                         │
+ │ 18:41:02.221  return information: 1:1001 = ON              │
+ │ 18:41:02.223  activation terminated — the command is …     │
+ ╰────────────────────────────────────────────────────────────╯
+```
+
+A command that is sent and never spoken of again is the failure this exists
+to make visible: the state line says what is still outstanding, a negative
+activation confirmation is reported as a refusal, and `UnknownIOA` says the
+outstation has no command at that address.
+
+**Select-before-execute is two transmissions**, as the standard intends. The
+dialog sends the select; the execute goes only once the outstation confirms
+it and the operator presses `enter` again. A failed select is never followed
+by an execute.
+
+`-direct` and `-no-confirm` turn the confirmation off for the devices and
+situations that need it. While `-no-confirm` is in effect **the toolbar says
+so** — it is the one mode where no dialog appears to say it for itself.
 `E` toggles between select-before-execute and direct execute at runtime.
 
 ## Editing the connection while it runs
@@ -193,6 +237,7 @@ to a timestamped CSV in the working directory.
 | `view.go`, `layout.go`, `theme.go` | rendering, and a layout computed from the terminal size |
 | `mouse.go` | resolving a pointer position to the key the keyboard would have pressed |
 | `command.go` | one type that describes a command, names it, and puts it on the wire |
+| `cmddialog.go` | the command dialog and the lifecycle it tracks afterwards |
 | `files.go` | the file transfer screen over the `filetransfer` package |
 | `export.go` | CSV export of the current view |
 
@@ -217,8 +262,13 @@ match the outstation's.
 recently updated. Raise it, or set `-stale 0`, for a slowly polled device.
 
 **A command is confirmed but nothing moves.** With select-before-execute the
-select is only half of it. The log shows the outstation's `ActivationCon`; a
-negative one (`,neg`) means it refused.
+select is only half of it — press `enter` again on the feedback dialog to
+send the execute. If the state line says the select was confirmed and nothing
+followed, the execute was never sent.
+
+**A command comes back `UnknownIOA`.** The outstation has no command at that
+address. Command addresses are not monitored-point addresses; look them up in
+the device's point list rather than reading one off the Points table.
 
 **Time tags look shifted.** Time tags carry no zone. The library encodes and
 decodes them in `Params.InfoObjTimeZone`, UTC by default, and the tool shows

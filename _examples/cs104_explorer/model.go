@@ -63,6 +63,7 @@ type pointState struct {
 	HasNum bool
 	Qds    asdu.QualityDescriptor
 	HasQds bool
+	IsQdp  bool
 	// Stamp is the device's own time tag, zero when the type carries none.
 	Stamp   time.Time
 	Updated time.Time
@@ -588,7 +589,7 @@ func (m *Model) applyUpdate(u updateMsg) {
 		}
 		p.Type, p.Cause = r.Type, r.Cause
 		p.Value = r.Value
-		p.Qds, p.HasQds = r.Qds, r.HasQds
+		p.Qds, p.HasQds, p.IsQdp = r.Qds, r.HasQds, r.IsQdp
 		p.Stamp = r.Stamp
 		p.Updated = u.at
 		p.Updates++
@@ -657,7 +658,7 @@ func (m *Model) visiblePoints() []*pointState {
 			continue
 		}
 		if !matchesFilter(m.filter, pointLabel(p.Key), typeName(p.Type),
-			p.Value, qualityText(p.Qds, p.HasQds), causeName(p.Cause)) {
+			p.Value, qualityTextKind(p.Qds, p.HasQds, p.IsQdp), causeName(p.Cause)) {
 			continue
 		}
 		out = append(out, p)
@@ -725,6 +726,9 @@ func qualityRank(p *pointState) int {
 		n += 2
 	}
 	if q&asdu.QDSOverflow != 0 {
+		n++
+	}
+	if p.IsQdp && q&asdu.QualityDescriptor(asdu.QDPElapsedTimeInvalid) != 0 {
 		n++
 	}
 	return n
@@ -969,12 +973,41 @@ func causeName(c asdu.Cause) string {
 }
 
 // qualityText names the set quality bits, or "GOOD" when none are.
+//
+// A protection equipment descriptor is a different set of flags in the same
+// octet, so it is named as one rather than being read as a measured value's.
 func qualityText(q asdu.QualityDescriptor, has bool) string {
+	return qualityTextKind(q, has, false)
+}
+
+func qualityTextKind(q asdu.QualityDescriptor, has, isQdp bool) string {
 	if !has {
 		return "—"
 	}
-	if q == asdu.QDSGood {
+	if q == 0 {
 		return "GOOD"
+	}
+	if isQdp {
+		var parts []string
+		if q&asdu.QualityDescriptor(asdu.QDPElapsedTimeInvalid) != 0 {
+			parts = append(parts, "EI")
+		}
+		if q&asdu.QualityDescriptor(asdu.QDPBlocked) != 0 {
+			parts = append(parts, "BL")
+		}
+		if q&asdu.QualityDescriptor(asdu.QDPSubstituted) != 0 {
+			parts = append(parts, "SB")
+		}
+		if q&asdu.QualityDescriptor(asdu.QDPNotTopical) != 0 {
+			parts = append(parts, "NT")
+		}
+		if q&asdu.QualityDescriptor(asdu.QDPInvalid) != 0 {
+			parts = append(parts, "IV")
+		}
+		if len(parts) == 0 {
+			return fmt.Sprintf("0x%02x", byte(q))
+		}
+		return strings.Join(parts, "|")
 	}
 	var parts []string
 	if q&asdu.QDSOverflow != 0 {

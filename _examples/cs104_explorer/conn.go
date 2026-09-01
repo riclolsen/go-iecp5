@@ -69,7 +69,10 @@ type pointUpdate struct {
 	HasNum bool
 	Qds    asdu.QualityDescriptor
 	HasQds bool
-	Stamp  time.Time
+	// IsQdp marks a protection equipment descriptor (QDP), whose flags are
+	// named differently from a measured value's.
+	IsQdp bool
+	Stamp time.Time
 }
 
 // connection owns the cs104 client and the file transfer receiver.
@@ -505,6 +508,34 @@ func decodeASDU(a *asdu.ASDU) ([]pointUpdate, string) {
 			}
 			rows = append(rows, mk(p.Ioa, v, float64(p.Value.CounterReading), true, q, true, p.Time))
 		}
+	case asdu.M_PS_NA_1:
+		for _, p := range a.GetPackedSinglePointWithSCD() {
+			rows = append(rows, mk(p.Ioa, fmt.Sprintf("0x%08X", uint32(p.Scd)),
+				float64(uint32(p.Scd)), true, p.Qds, true, time.Time{}))
+		}
+
+	case asdu.M_EP_TA_1, asdu.M_EP_TD_1:
+		for _, p := range a.GetEventOfProtectionEquipment() {
+			r := mk(p.Ioa, singleEventText(p.Event)+fmt.Sprintf(" %dms", p.Msec),
+				float64(p.Event), true, asdu.QualityDescriptor(p.Qdp), true, p.Time)
+			r.IsQdp = true
+			rows = append(rows, r)
+		}
+
+	case asdu.M_EP_TB_1, asdu.M_EP_TE_1:
+		p := a.GetPackedStartEventsOfProtectionEquipment()
+		r := mk(p.Ioa, startEventText(p.Event)+fmt.Sprintf(" %dms", p.Msec),
+			float64(p.Event), true, asdu.QualityDescriptor(p.Qdp), true, p.Time)
+		r.IsQdp = true
+		rows = append(rows, r)
+
+	case asdu.M_EP_TC_1, asdu.M_EP_TF_1:
+		p := a.GetPackedOutputCircuitInfo()
+		r := mk(p.Ioa, outputCircuitText(p.Oci)+fmt.Sprintf(" %dms", p.Msec),
+			float64(p.Oci), true, asdu.QualityDescriptor(p.Qdp), true, p.Time)
+		r.IsQdp = true
+		rows = append(rows, r)
+
 	case asdu.M_EI_NA_1:
 		ioa, coi := a.GetEndOfInitialization()
 		rows = append(rows, mk(ioa, fmt.Sprintf("init cause %d", byte(coi.Cause)),
@@ -531,6 +562,67 @@ func summarize(a *asdu.ASDU, n int) string {
 		fmt.Fprintf(&b, "  %s", plural(n, "object"))
 	}
 	return b.String()
+}
+
+// singleEventText names the state a protection event reports.
+func singleEventText(e asdu.SingleEvent) string {
+	switch e {
+	case asdu.SEDeterminedOn:
+		return "ON"
+	case asdu.SEDeterminedOff:
+		return "OFF"
+	case asdu.SEIndeterminateOrIntermediate:
+		return "INTERMED"
+	default:
+		return "INDETERM"
+	}
+}
+
+// startEventText names which phases a protection start reports. The flags are
+// a set, not an enumeration, so all of them are shown.
+func startEventText(e asdu.StartEvent) string {
+	var f []string
+	for _, b := range []struct {
+		bit  asdu.StartEvent
+		name string
+	}{
+		{asdu.SEPGeneralStart, "GS"},
+		{asdu.SEPStartL1, "L1"},
+		{asdu.SEPStartL2, "L2"},
+		{asdu.SEPStartL3, "L3"},
+		{asdu.SEPStartEarthCurrent, "IE"},
+		{asdu.SEPStartReverseDirection, "REV"},
+	} {
+		if e&b.bit != 0 {
+			f = append(f, b.name)
+		}
+	}
+	if len(f) == 0 {
+		return "none"
+	}
+	return strings.Join(f, "|")
+}
+
+// outputCircuitText names which output circuits a protection relay drove.
+func outputCircuitText(o asdu.OutputCircuitInfo) string {
+	var f []string
+	for _, b := range []struct {
+		bit  asdu.OutputCircuitInfo
+		name string
+	}{
+		{asdu.OCIGeneralCommand, "GC"},
+		{asdu.OCICommandL1, "L1"},
+		{asdu.OCICommandL2, "L2"},
+		{asdu.OCICommandL3, "L3"},
+	} {
+		if o&b.bit != 0 {
+			f = append(f, b.name)
+		}
+	}
+	if len(f) == 0 {
+		return "none"
+	}
+	return strings.Join(f, "|")
 }
 
 // dpText abbreviates a double point for a table cell.
