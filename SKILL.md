@@ -369,3 +369,45 @@ throughput note in `docs/cs104.md`.
   stack in tests.
 - Third-party interop: `lib60870` (C), OpenMUC j60870, QTester104, mosaik,
   or any IEC 104 test set with defaults k=12, w=8, t1=15s, t2=10s, t3=20s.
+
+
+## Sending in bulk: the one mistake that loses data
+
+`Send` does not block. When a session's send buffer (`k << 4`, 192 by
+default) is full it returns `cs104.ErrBufferFulled` and **queues nothing**.
+
+```go
+// WRONG — works on a small database, silently loses ASDUs on a large one.
+_ = asdu.MeasuredValueFloat(c, false, cause, ca, values...)
+```
+
+An interrogation reply over a few thousand information objects fills that
+buffer long before the master can acknowledge it, so the outstation believes
+it answered in full while the master has holes it cannot detect.
+
+```go
+// RIGHT — the reply waits for buffer room instead of dropping.
+ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+defer cancel()
+w := cs104.Waiting(ctx, c)
+
+for _, batch := range database {
+	if err := asdu.MeasuredValueFloat(w, false, cause, ca, batch...); err != nil {
+		return err // a real failure, not a full buffer
+	}
+}
+```
+
+Rules:
+
+- Never write `_ =` in front of an `asdu.*` send. Check it or route it
+  through `cs104.Waiting`.
+- Always give `Waiting` a context deadline: a master that stopped
+  acknowledging must not block a handler for ever.
+- To broadcast to every connected master use `srv.SendWait(ctx, a)`, not a
+  retry loop around `srv.Send` — a retry would duplicate to the sessions that
+  already accepted it.
+- On the receive side the library blocks rather than drops, so back-pressure
+  reaches TCP and nothing is lost. A handler that does slow per-ASDU work
+  throttles the peer; accumulate arrivals and process them in batches
+  instead.

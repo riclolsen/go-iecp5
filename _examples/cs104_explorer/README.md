@@ -62,6 +62,7 @@ cs104-explorer -demo
 | `-mouse` | true | enable the mouse |
 | `-inline` | off | draw inline instead of taking the whole terminal |
 | `-stale DUR` | 30s | fade points not updated for this long; `0` disables |
+| `-history N` | 100000 | arrivals the event list keeps; `0` keeps everything |
 | `-file-dir PATH` | `iec104-files` | where completed file transfers are written |
 | `-v` | off | start with protocol logging on |
 
@@ -87,6 +88,15 @@ time tag.
 
 **3 Events** — every arrival in order, newest last. What changed and when, as
 distinct from what the value is now.
+
+The point table keeps **every** information object a device reports; the event
+list is a window, because the order of arrivals is unbounded while a device
+keeps talking. The window defaults to 100000, which holds one general
+interrogation of a very large device with room to spare — one interrogation of
+an *N* object outstation produces *N* arrivals, so a 15000 point device fills
+15000 of it at a stroke. When the window does trim, the tab bar and the
+Overview say how many arrivals were discarded; raise `-history`, or set
+`-history 0` to keep everything.
 
 **4 Log** — the activity log: what was sent, what came back, what failed.
 `v` adds the library's own protocol log — raw frames, APCI and ASDU decode.
@@ -231,7 +241,7 @@ to a timestamped CSV in the working directory.
 
 | File | Shows |
 | --- | --- |
-| `conn.go` | the session lifecycle, the cs104 client in its own goroutine, ASDU decoding into table rows |
+| `conn.go` | the session lifecycle, the cs104 client in its own goroutine, ASDU decoding into table rows, and the batch queue that keeps a burst from being dropped |
 | `demo.go` | a complete in-process outstation: interrogation, spontaneous data, commands, file transfer |
 | `model.go` | the Bubble Tea model: point state, event ring, sorting and filtering, key handling |
 | `view.go`, `layout.go`, `theme.go` | rendering, and a layout computed from the terminal size |
@@ -242,9 +252,23 @@ to a timestamped CSV in the working directory.
 | `export.go` | CSV export of the current view |
 
 The architecture worth copying: **the cs104 session runs in its own goroutines
-and never touches the model.** Everything the device says arrives on one
-channel that the model drains, and every action is a `tea.Cmd` that returns a
-result message.
+and never touches the model.** Everything the device says is accumulated into
+a batch that the model takes whole, and every action is a `tea.Cmd` that
+returns a result message.
+
+**Arrivals are batched, and that is not an optimisation.** Bubble Tea
+processes one message per update cycle with a render in between. One message
+per ASDU into a bounded channel means the interface decides how much of the
+device's database it is willing to look at and discards the rest: measured
+against a 4500-object outstation reporting events, that cost **about 40% of
+the stream, silently**. Batching makes the cost one render per burst instead
+of one per ASDU, and a batch that outgrows its limit makes the protocol
+goroutine wait — so back-pressure reaches TCP and the outstation holds the
+data at the source rather than the master losing it.
+
+The Overview screen shows a **Dropped** count for the messages that *are*
+droppable (log and status lines). A tool that loses anything quietly is not
+one you can trust about what a device sent.
 
 Key handling is a plain `HandleKey(string)`, and the pointer resolves against
 a layout computed from the terminal size. That is what lets the whole
@@ -269,6 +293,19 @@ followed, the execute was never sent.
 **A command comes back `UnknownIOA`.** The outstation has no command at that
 address. Command addresses are not monitored-point addresses; look them up in
 the device's point list rather than reading one off the Points table.
+
+**The Events list shows fewer arrivals than the device sent.** Check the tab
+bar: it says `N older discarded` when the event window has trimmed. The point
+table is unaffected — it keeps every object — but the arrival history is a
+window, and one interrogation of a 15000 point device produces 15000
+arrivals. Raise `-history`.
+
+**Points are missing after interrogating a large device.** The explorer no
+longer drops them, so suspect the outstation: `cs104`'s `Send` does not
+block, and an outstation that writes `_ = asdu.MeasuredValueFloat(c, ...)`
+loses ASDUs as soon as its send buffer fills — it believes it answered in
+full. Check `Objects in` on the Overview against the device's point count,
+and see [the cs104 guide](../../docs/cs104.md#sending-flow-control-and-back-pressure).
 
 **Time tags look shifted.** Time tags carry no zone. The library encodes and
 decodes them in `Params.InfoObjTimeZone`, UTC by default, and the tool shows

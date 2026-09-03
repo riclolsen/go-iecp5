@@ -1,13 +1,19 @@
 package main
 
 import (
+	"context"
 	"math"
 	"math/rand"
 	"sync"
 	"time"
 
 	"github.com/riclolsen/go-iecp5/asdu"
+	"github.com/riclolsen/go-iecp5/cs104"
 )
+
+// sendTimeout bounds how long a reply waits for send-buffer room. A master
+// that has stopped acknowledging must not block the simulation for ever.
+const sendTimeout = 30 * time.Second
 
 // The simulated database.
 //
@@ -172,10 +178,36 @@ type sim struct {
 	tick  uint64
 	phase float64
 	rnd   *rand.Rand
+
+	// copies repeats the whole address plan at multiples of ioaStride, so
+	// this example can stand in for a large outstation database. The values
+	// are shared between copies; only the addresses differ.
+	copies int
 }
 
-func newSim() *sim {
-	s := &sim{rnd: rand.New(rand.NewSource(1))}
+// ioaStride is the gap between repeated copies of the address plan. The plan
+// spans 0..9601, so 10000 keeps each copy's addresses readable: copy 3's
+// single points are at 31001..31012.
+const ioaStride = 10000
+
+// offsets is the base address of each copy of the plan.
+func (s *sim) offsets() []int {
+	n := s.copies
+	if n < 1 {
+		n = 1
+	}
+	out := make([]int, n)
+	for i := range out {
+		out[i] = i * ioaStride
+	}
+	return out
+}
+
+func newSim(copies int) *sim {
+	if copies < 1 {
+		copies = 1
+	}
+	s := &sim{rnd: rand.New(rand.NewSource(1)), copies: copies}
 
 	// Digitals start in a mixture of states rather than all off.
 	for i := range s.single {
@@ -340,6 +372,18 @@ func (s *sim) quality(block string, i int) asdu.QualityDescriptor {
 // untagged monitored types. Counters are not included — counter
 // interrogation returns those.
 func (s *sim) interrogation(c asdu.Connect, cause asdu.CauseOfTransmission) {
+	for _, off := range s.offsets() {
+		s.interrogationAt(c, cause, off)
+	}
+}
+
+func (s *sim) interrogationAt(c asdu.Connect, cause asdu.CauseOfTransmission, off int) {
+	// A large database does not fit in the session's send buffer, so the
+	// sends below wait for room rather than being refused and lost.
+	ctx, cancel := context.WithTimeout(context.Background(), sendTimeout)
+	defer cancel()
+	c = cs104.Waiting(ctx, c)
+
 	s.mu.Lock()
 	single, double := s.single, s.double
 	step, bits := s.step, s.bits
@@ -351,53 +395,53 @@ func (s *sim) interrogation(c asdu.Connect, cause asdu.CauseOfTransmission) {
 	sp := make([]asdu.SinglePointInfo, 0, nSingle)
 	for i, v := range single {
 		sp = append(sp, asdu.SinglePointInfo{
-			Ioa: asdu.InfoObjAddr(ioaSingle + i), Value: v, Qds: qualityFor(i)})
+			Ioa: asdu.InfoObjAddr(ioaSingle + i + off), Value: v, Qds: qualityFor(i)})
 	}
-	_ = asdu.Single(c, false, cause, simCA, sp...)
+	emit(func() error { return asdu.Single(c, false, cause, simCA, sp...) })
 
 	dp := make([]asdu.DoublePointInfo, 0, nDouble)
 	for i, v := range double {
 		dp = append(dp, asdu.DoublePointInfo{
-			Ioa: asdu.InfoObjAddr(ioaDouble + i), Value: v, Qds: qualityFor(i)})
+			Ioa: asdu.InfoObjAddr(ioaDouble + i + off), Value: v, Qds: qualityFor(i)})
 	}
-	_ = asdu.Double(c, false, cause, simCA, dp...)
+	emit(func() error { return asdu.Double(c, false, cause, simCA, dp...) })
 
 	st := make([]asdu.StepPositionInfo, 0, nStep)
 	for i, v := range step {
 		st = append(st, asdu.StepPositionInfo{
-			Ioa: asdu.InfoObjAddr(ioaStep + i), Value: v, Qds: qualityFor(i)})
+			Ioa: asdu.InfoObjAddr(ioaStep + i + off), Value: v, Qds: qualityFor(i)})
 	}
-	_ = asdu.Step(c, false, cause, simCA, st...)
+	emit(func() error { return asdu.Step(c, false, cause, simCA, st...) })
 
 	bs := make([]asdu.BitString32Info, 0, nBits)
 	for i, v := range bits {
 		bs = append(bs, asdu.BitString32Info{
-			Ioa: asdu.InfoObjAddr(ioaBits + i), Value: v, Qds: qualityFor(i)})
+			Ioa: asdu.InfoObjAddr(ioaBits + i + off), Value: v, Qds: qualityFor(i)})
 	}
-	_ = asdu.BitString32(c, false, cause, simCA, bs...)
+	emit(func() error { return asdu.BitString32(c, false, cause, simCA, bs...) })
 
 	nv := make([]asdu.MeasuredValueNormalInfo, 0, nNormal)
 	for i, v := range normal {
 		nv = append(nv, asdu.MeasuredValueNormalInfo{
-			Ioa: asdu.InfoObjAddr(ioaNormal + i), Value: v, Qds: qualityFor(i)})
+			Ioa: asdu.InfoObjAddr(ioaNormal + i + off), Value: v, Qds: qualityFor(i)})
 	}
-	_ = asdu.MeasuredValueNormal(c, false, cause, simCA, nv...)
+	emit(func() error { return asdu.MeasuredValueNormal(c, false, cause, simCA, nv...) })
 
 	// M_ME_ND_1 carries no quality descriptor at all: the master should show
 	// it as having none rather than inventing GOOD.
 	nq := make([]asdu.MeasuredValueNormalInfo, 0, nNormalNoQual)
 	for i, v := range normalNoQual {
 		nq = append(nq, asdu.MeasuredValueNormalInfo{
-			Ioa: asdu.InfoObjAddr(ioaNormalNoQual + i), Value: v})
+			Ioa: asdu.InfoObjAddr(ioaNormalNoQual + i + off), Value: v})
 	}
-	_ = asdu.MeasuredValueNormalNoQuality(c, false, cause, simCA, nq...)
+	emit(func() error { return asdu.MeasuredValueNormalNoQuality(c, false, cause, simCA, nq...) })
 
 	sv := make([]asdu.MeasuredValueScaledInfo, 0, nScaled)
 	for i, v := range scaled {
 		sv = append(sv, asdu.MeasuredValueScaledInfo{
-			Ioa: asdu.InfoObjAddr(ioaScaled + i), Value: v, Qds: qualityFor(i)})
+			Ioa: asdu.InfoObjAddr(ioaScaled + i + off), Value: v, Qds: qualityFor(i)})
 	}
-	_ = asdu.MeasuredValueScaled(c, false, cause, simCA, sv...)
+	emit(func() error { return asdu.MeasuredValueScaled(c, false, cause, simCA, sv...) })
 
 	// The float block is split so one ASDU stays inside the 249 octet limit
 	// with room to spare.
@@ -408,22 +452,34 @@ func (s *sim) interrogation(c asdu.Connect, cause asdu.CauseOfTransmission) {
 			q |= asdu.QDSInvalid
 		}
 		fv = append(fv, asdu.MeasuredValueFloatInfo{
-			Ioa: asdu.InfoObjAddr(ioaFloat + i), Value: v, Qds: q})
+			Ioa: asdu.InfoObjAddr(ioaFloat + i + off), Value: v, Qds: q})
 	}
-	_ = asdu.MeasuredValueFloat(c, false, cause, simCA, fv[:6]...)
-	_ = asdu.MeasuredValueFloat(c, false, cause, simCA, fv[6:]...)
+	emit(func() error { return asdu.MeasuredValueFloat(c, false, cause, simCA, fv[:6]...) })
+	emit(func() error { return asdu.MeasuredValueFloat(c, false, cause, simCA, fv[6:]...) })
 
 	ps := make([]asdu.PackedSinglePointWithSCDInfo, 0, nPackedSCD)
 	for i, v := range scd {
 		ps = append(ps, asdu.PackedSinglePointWithSCDInfo{
-			Ioa: asdu.InfoObjAddr(ioaPackedSCD + i), Scd: v, Qds: qualityFor(i)})
+			Ioa: asdu.InfoObjAddr(ioaPackedSCD + i + off), Scd: v, Qds: qualityFor(i)})
 	}
-	_ = asdu.PackedSinglePointWithSCD(c, false, cause, simCA, ps...)
+	emit(func() error { return asdu.PackedSinglePointWithSCD(c, false, cause, simCA, ps...) })
 }
 
 // counterInterrogation returns the integrated totals, with the counter's own
 // flags: one is adjusted, one carries, one is invalid.
 func (s *sim) counterInterrogation(c asdu.Connect, cause asdu.CauseOfTransmission) {
+	for _, off := range s.offsets() {
+		s.counterInterrogationAt(c, cause, off)
+	}
+}
+
+func (s *sim) counterInterrogationAt(c asdu.Connect, cause asdu.CauseOfTransmission, off int) {
+	// A large database does not fit in the session's send buffer, so the
+	// sends below wait for room rather than being refused and lost.
+	ctx, cancel := context.WithTimeout(context.Background(), sendTimeout)
+	defer cancel()
+	c = cs104.Waiting(ctx, c)
+
 	s.mu.Lock()
 	counters, countersCP56 := s.counters, s.countersCP56
 	seq := byte(s.tick % 32)
@@ -432,7 +488,7 @@ func (s *sim) counterInterrogation(c asdu.Connect, cause asdu.CauseOfTransmissio
 	it := make([]asdu.BinaryCounterReadingInfo, 0, nCounter)
 	for i, v := range counters {
 		it = append(it, asdu.BinaryCounterReadingInfo{
-			Ioa: asdu.InfoObjAddr(ioaCounter + i),
+			Ioa: asdu.InfoObjAddr(ioaCounter + i + off),
 			Value: asdu.BinaryCounterReading{
 				CounterReading: v, SeqNumber: seq,
 				HasCarry:   i == 1,
@@ -440,16 +496,18 @@ func (s *sim) counterInterrogation(c asdu.Connect, cause asdu.CauseOfTransmissio
 				IsInvalid:  i == 3,
 			}})
 	}
-	_ = asdu.IntegratedTotals(c, false, cause, simCA, it...)
+	emit(func() error { return asdu.IntegratedTotals(c, false, cause, simCA, it...) })
 
 	now := time.Now()
 	for i, v := range countersCP56 {
-		_ = asdu.IntegratedTotalsCP56Time2a(c, cause, simCA,
-			asdu.BinaryCounterReadingInfo{
-				Ioa:   asdu.InfoObjAddr(ioaCounterCP56 + i),
-				Value: asdu.BinaryCounterReading{CounterReading: v, SeqNumber: seq},
-				Time:  now,
-			})
+		emit(func() error {
+			return asdu.IntegratedTotalsCP56Time2a(c, cause, simCA,
+				asdu.BinaryCounterReadingInfo{
+					Ioa:   asdu.InfoObjAddr(ioaCounterCP56 + i + off),
+					Value: asdu.BinaryCounterReading{CounterReading: v, SeqNumber: seq},
+					Time:  now,
+				})
+		})
 	}
 }
 
@@ -459,6 +517,15 @@ func (s *sim) counterInterrogation(c asdu.Connect, cause asdu.CauseOfTransmissio
 // events. These are never part of an interrogation reply, so this is the only
 // place they appear.
 func (s *sim) spontaneous(c asdu.Connect) {
+	for _, off := range s.offsets() {
+		s.spontaneousAt(c, off)
+	}
+}
+
+// spontaneousAt reports the time-tagged types and the protection events. The
+// caller supplies a Connect that waits for send-buffer room.
+func (s *sim) spontaneousAt(c asdu.Connect, off int) {
+
 	s.mu.Lock()
 	singleCP24, singleCP56 := s.singleCP24, s.singleCP56
 	doubleCP56, stepCP56, bitsCP56 := s.doubleCP56, s.stepCP56, s.bitsCP56
@@ -471,61 +538,77 @@ func (s *sim) spontaneous(c asdu.Connect) {
 
 	// Single points with both time tag widths.
 	for i, v := range singleCP56 {
-		_ = asdu.SingleCP56Time2a(c, spont, simCA, asdu.SinglePointInfo{
-			Ioa: asdu.InfoObjAddr(ioaSingleCP56 + i), Value: v,
-			Qds: qualityFor(i), Time: now})
+		emit(func() error {
+			return asdu.SingleCP56Time2a(c, spont, simCA, asdu.SinglePointInfo{
+				Ioa: asdu.InfoObjAddr(ioaSingleCP56 + i + off), Value: v,
+				Qds: qualityFor(i), Time: now})
+		})
 	}
 	if tick%3 == 0 {
 		for i, v := range singleCP24 {
-			_ = asdu.SingleCP24Time2a(c, spont, simCA, asdu.SinglePointInfo{
-				Ioa: asdu.InfoObjAddr(ioaSingleCP24 + i), Value: v,
-				Qds: qualityFor(i), Time: now})
+			emit(func() error {
+				return asdu.SingleCP24Time2a(c, spont, simCA, asdu.SinglePointInfo{
+					Ioa: asdu.InfoObjAddr(ioaSingleCP24 + i + off), Value: v,
+					Qds: qualityFor(i), Time: now})
+			})
 		}
 	}
 
 	for i, v := range doubleCP56 {
-		_ = asdu.DoubleCP56Time2a(c, spont, simCA, asdu.DoublePointInfo{
-			Ioa: asdu.InfoObjAddr(ioaDoubleCP56 + i), Value: v,
-			Qds: qualityFor(i), Time: now})
+		emit(func() error {
+			return asdu.DoubleCP56Time2a(c, spont, simCA, asdu.DoublePointInfo{
+				Ioa: asdu.InfoObjAddr(ioaDoubleCP56 + i + off), Value: v,
+				Qds: qualityFor(i), Time: now})
+		})
 	}
 	for i, v := range stepCP56 {
-		_ = asdu.StepCP56Time2a(c, spont, simCA, asdu.StepPositionInfo{
-			Ioa: asdu.InfoObjAddr(ioaStepCP56 + i), Value: v,
-			Qds: qualityFor(i), Time: now})
+		emit(func() error {
+			return asdu.StepCP56Time2a(c, spont, simCA, asdu.StepPositionInfo{
+				Ioa: asdu.InfoObjAddr(ioaStepCP56 + i + off), Value: v,
+				Qds: qualityFor(i), Time: now})
+		})
 	}
 	for i, v := range bitsCP56 {
-		_ = asdu.BitString32CP56Time2a(c, spont, simCA, asdu.BitString32Info{
-			Ioa: asdu.InfoObjAddr(ioaBitsCP56 + i), Value: v,
-			Qds: qualityFor(i), Time: now})
+		emit(func() error {
+			return asdu.BitString32CP56Time2a(c, spont, simCA, asdu.BitString32Info{
+				Ioa: asdu.InfoObjAddr(ioaBitsCP56 + i + off), Value: v,
+				Qds: qualityFor(i), Time: now})
+		})
 	}
 	for i, v := range normalCP56 {
-		_ = asdu.MeasuredValueNormalCP56Time2a(c, spont, simCA,
-			asdu.MeasuredValueNormalInfo{
-				Ioa: asdu.InfoObjAddr(ioaNormalCP56 + i), Value: v,
-				Qds: qualityFor(i), Time: now})
+		emit(func() error {
+			return asdu.MeasuredValueNormalCP56Time2a(c, spont, simCA,
+				asdu.MeasuredValueNormalInfo{
+					Ioa: asdu.InfoObjAddr(ioaNormalCP56 + i + off), Value: v,
+					Qds: qualityFor(i), Time: now})
+		})
 	}
 	for i, v := range scaledCP56 {
-		_ = asdu.MeasuredValueScaledCP56Time2a(c, spont, simCA,
-			asdu.MeasuredValueScaledInfo{
-				Ioa: asdu.InfoObjAddr(ioaScaledCP56 + i), Value: v,
-				Qds: qualityFor(i), Time: now})
+		emit(func() error {
+			return asdu.MeasuredValueScaledCP56Time2a(c, spont, simCA,
+				asdu.MeasuredValueScaledInfo{
+					Ioa: asdu.InfoObjAddr(ioaScaledCP56 + i + off), Value: v,
+					Qds: qualityFor(i), Time: now})
+		})
 	}
 	for i, v := range floatsCP56 {
-		_ = asdu.MeasuredValueFloatCP56Time2a(c, spont, simCA,
-			asdu.MeasuredValueFloatInfo{
-				Ioa: asdu.InfoObjAddr(ioaFloatCP56 + i), Value: v,
-				Qds: qualityFor(i), Time: now})
+		emit(func() error {
+			return asdu.MeasuredValueFloatCP56Time2a(c, spont, simCA,
+				asdu.MeasuredValueFloatInfo{
+					Ioa: asdu.InfoObjAddr(ioaFloatCP56 + i + off), Value: v,
+					Qds: qualityFor(i), Time: now})
+		})
 	}
 
 	// Protection equipment: a relay reports an event, which phases started,
 	// and which output circuits it drove — each with its own elapsed time.
 	if tick%5 == 0 {
-		s.protection(c, now, tick)
+		s.protection(c, now, tick, off)
 	}
 }
 
 // protection sends the six protection equipment types.
-func (s *sim) protection(c asdu.Connect, now time.Time, tick uint64) {
+func (s *sim) protection(c asdu.Connect, now time.Time, tick uint64, off int) {
 	spont := asdu.CauseOfTransmission{Cause: asdu.Spontaneous}
 
 	events := []asdu.SingleEvent{
@@ -535,14 +618,14 @@ func (s *sim) protection(c asdu.Connect, now time.Time, tick uint64) {
 	ev := make([]asdu.EventOfProtectionEquipmentInfo, 0, nProtEvent)
 	for i := 0; i < nProtEvent; i++ {
 		ev = append(ev, asdu.EventOfProtectionEquipmentInfo{
-			Ioa:   asdu.InfoObjAddr(ioaProtEvent + i),
+			Ioa:   asdu.InfoObjAddr(ioaProtEvent + i + off),
 			Event: events[(int(tick)+i)%len(events)],
 			Qdp:   qdpFor(i),
 			Msec:  uint16(40 + 17*i),
 			Time:  now,
 		})
 	}
-	_ = asdu.EventOfProtectionEquipmentCP56Time2a(c, spont, simCA, ev...)
+	emit(func() error { return asdu.EventOfProtectionEquipmentCP56Time2a(c, spont, simCA, ev...) })
 
 	// Which phases started: the flags are a set, not an enumeration.
 	start := asdu.SEPGeneralStart | asdu.SEPStartL1
@@ -554,10 +637,12 @@ func (s *sim) protection(c asdu.Connect, now time.Time, tick uint64) {
 	case 3:
 		start |= asdu.SEPStartReverseDirection
 	}
-	_ = asdu.PackedStartEventsOfProtectionEquipmentCP56Time2a(c, spont, simCA,
-		asdu.PackedStartEventsOfProtectionEquipmentInfo{
-			Ioa: ioaProtStart, Event: start, Qdp: qdpFor(int(tick)),
-			Msec: uint16(60 + tick%40), Time: now})
+	emit(func() error {
+		return asdu.PackedStartEventsOfProtectionEquipmentCP56Time2a(c, spont, simCA,
+			asdu.PackedStartEventsOfProtectionEquipmentInfo{
+				Ioa: asdu.InfoObjAddr(ioaProtStart + off), Event: start, Qdp: qdpFor(int(tick)),
+				Msec: uint16(60 + tick%40), Time: now})
+	})
 
 	oci := asdu.OCIGeneralCommand
 	switch tick / 5 % 3 {
@@ -566,42 +651,55 @@ func (s *sim) protection(c asdu.Connect, now time.Time, tick uint64) {
 	case 2:
 		oci |= asdu.OCICommandL3
 	}
-	_ = asdu.PackedOutputCircuitInfoCP56Time2a(c, spont, simCA,
-		asdu.PackedOutputCircuitInfoInfo{
-			Ioa: ioaProtOutput, Oci: oci, Qdp: qdpFor(int(tick) + 1),
-			Msec: uint16(25 + tick%30), Time: now})
+	emit(func() error {
+		return asdu.PackedOutputCircuitInfoCP56Time2a(c, spont, simCA,
+			asdu.PackedOutputCircuitInfoInfo{
+				Ioa: asdu.InfoObjAddr(ioaProtOutput + off), Oci: oci, Qdp: qdpFor(int(tick) + 1),
+				Msec: uint16(25 + tick%30), Time: now})
+	})
 
 	// The CP24Time2a variants of the same three, so a master that only
 	// implements one time tag width is found out.
-	_ = asdu.EventOfProtectionEquipmentCP24Time2a(c, spont, simCA,
-		asdu.EventOfProtectionEquipmentInfo{
-			Ioa: ioaProtEvent24, Event: events[int(tick)%len(events)],
-			Qdp: qdpFor(2), Msec: 33, Time: now})
-	_ = asdu.PackedStartEventsOfProtectionEquipmentCP24Time2a(c, spont, simCA,
-		asdu.PackedStartEventsOfProtectionEquipmentInfo{
-			Ioa: ioaProtStart24, Event: asdu.SEPGeneralStart | asdu.SEPStartEarthCurrent,
-			Qdp: qdpFor(3), Msec: 44, Time: now})
-	_ = asdu.PackedOutputCircuitInfoCP24Time2a(c, spont, simCA,
-		asdu.PackedOutputCircuitInfoInfo{
-			Ioa: ioaProtOutput24, Oci: asdu.OCIGeneralCommand | asdu.OCICommandL3,
-			Qdp: qdpFor(4), Msec: 55, Time: now})
+	emit(func() error {
+		return asdu.EventOfProtectionEquipmentCP24Time2a(c, spont, simCA,
+			asdu.EventOfProtectionEquipmentInfo{
+				Ioa: asdu.InfoObjAddr(ioaProtEvent24 + off), Event: events[int(tick)%len(events)],
+				Qdp: qdpFor(2), Msec: 33, Time: now})
+	})
+	emit(func() error {
+		return asdu.PackedStartEventsOfProtectionEquipmentCP24Time2a(c, spont, simCA,
+			asdu.PackedStartEventsOfProtectionEquipmentInfo{
+				Ioa: asdu.InfoObjAddr(ioaProtStart24 + off), Event: asdu.SEPGeneralStart | asdu.SEPStartEarthCurrent,
+				Qdp: qdpFor(3), Msec: 44, Time: now})
+	})
+	emit(func() error {
+		return asdu.PackedOutputCircuitInfoCP24Time2a(c, spont, simCA,
+			asdu.PackedOutputCircuitInfoInfo{
+				Ioa: asdu.InfoObjAddr(ioaProtOutput24 + off), Oci: asdu.OCIGeneralCommand | asdu.OCICommandL3,
+				Qdp: qdpFor(4), Msec: 55, Time: now})
+	})
 }
 
 // endOfInitialization is what a device says when it comes up, and what a
 // master uses to know its picture is stale.
 func (s *sim) endOfInitialization(c asdu.Connect) {
-	_ = asdu.EndOfInitialization(c, asdu.CauseOfTransmission{}, simCA, 0,
-		asdu.CauseOfInitial{Cause: asdu.COILocalPowerOn})
+	emit(func() error {
+		return asdu.EndOfInitialization(c, asdu.CauseOfTransmission{}, simCA, 0,
+			asdu.CauseOfInitial{Cause: asdu.COILocalPowerOn})
+	})
 }
 
 // totalObjects is how many information objects the simulation holds, for the
 // start-up banner.
-func totalObjects() int {
-	return nSingle + nSingleCP24 + nSingleCP56 +
+func totalObjects(copies int) int {
+	if copies < 1 {
+		copies = 1
+	}
+	return copies * (nSingle + nSingleCP24 + nSingleCP56 +
 		nDouble + nDoubleCP56 + nStep + nStepCP56 + nBits + nBitsCP56 +
 		nNormal + nNormalNoQual + nNormalCP56 + nScaled + nScaledCP56 +
 		nFloat + nFloatCP56 + nCounter + nCounterCP56 + nPackedSCD +
-		nProtEvent + 5 // the five single-object protection types
+		nProtEvent + 5) // the five single-object protection types
 }
 
 // readOne answers a read command (C_RD_NA_1) for a single address, which is
@@ -609,7 +707,11 @@ func totalObjects() int {
 // It reports whether the address is one this simulator holds.
 func (s *sim) readOne(c asdu.Connect, ioa asdu.InfoObjAddr) bool {
 	req := asdu.CauseOfTransmission{Cause: asdu.Request}
-	i := int(ioa)
+	// Reduce the address to its offset within one copy of the plan.
+	i := int(ioa) % ioaStride
+	if int(ioa)/ioaStride >= s.copies {
+		return false
+	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -617,40 +719,58 @@ func (s *sim) readOne(c asdu.Connect, ioa asdu.InfoObjAddr) bool {
 	switch {
 	case i >= ioaSingle && i < ioaSingle+nSingle:
 		n := i - ioaSingle
-		_ = asdu.Single(c, false, req, simCA, asdu.SinglePointInfo{
-			Ioa: ioa, Value: s.single[n], Qds: qualityFor(n)})
+		emit(func() error {
+			return asdu.Single(c, false, req, simCA, asdu.SinglePointInfo{
+				Ioa: ioa, Value: s.single[n], Qds: qualityFor(n)})
+		})
 	case i >= ioaDouble && i < ioaDouble+nDouble:
 		n := i - ioaDouble
-		_ = asdu.Double(c, false, req, simCA, asdu.DoublePointInfo{
-			Ioa: ioa, Value: s.double[n], Qds: qualityFor(n)})
+		emit(func() error {
+			return asdu.Double(c, false, req, simCA, asdu.DoublePointInfo{
+				Ioa: ioa, Value: s.double[n], Qds: qualityFor(n)})
+		})
 	case i >= ioaStep && i < ioaStep+nStep:
 		n := i - ioaStep
-		_ = asdu.Step(c, false, req, simCA, asdu.StepPositionInfo{
-			Ioa: ioa, Value: s.step[n], Qds: qualityFor(n)})
+		emit(func() error {
+			return asdu.Step(c, false, req, simCA, asdu.StepPositionInfo{
+				Ioa: ioa, Value: s.step[n], Qds: qualityFor(n)})
+		})
 	case i >= ioaBits && i < ioaBits+nBits:
 		n := i - ioaBits
-		_ = asdu.BitString32(c, false, req, simCA, asdu.BitString32Info{
-			Ioa: ioa, Value: s.bits[n], Qds: qualityFor(n)})
+		emit(func() error {
+			return asdu.BitString32(c, false, req, simCA, asdu.BitString32Info{
+				Ioa: ioa, Value: s.bits[n], Qds: qualityFor(n)})
+		})
 	case i >= ioaNormal && i < ioaNormal+nNormal:
 		n := i - ioaNormal
-		_ = asdu.MeasuredValueNormal(c, false, req, simCA, asdu.MeasuredValueNormalInfo{
-			Ioa: ioa, Value: s.normal[n], Qds: qualityFor(n)})
+		emit(func() error {
+			return asdu.MeasuredValueNormal(c, false, req, simCA, asdu.MeasuredValueNormalInfo{
+				Ioa: ioa, Value: s.normal[n], Qds: qualityFor(n)})
+		})
 	case i >= ioaNormalNoQual && i < ioaNormalNoQual+nNormalNoQual:
 		n := i - ioaNormalNoQual
-		_ = asdu.MeasuredValueNormalNoQuality(c, false, req, simCA,
-			asdu.MeasuredValueNormalInfo{Ioa: ioa, Value: s.normalNoQual[n]})
+		emit(func() error {
+			return asdu.MeasuredValueNormalNoQuality(c, false, req, simCA,
+				asdu.MeasuredValueNormalInfo{Ioa: ioa, Value: s.normalNoQual[n]})
+		})
 	case i >= ioaScaled && i < ioaScaled+nScaled:
 		n := i - ioaScaled
-		_ = asdu.MeasuredValueScaled(c, false, req, simCA, asdu.MeasuredValueScaledInfo{
-			Ioa: ioa, Value: s.scaled[n], Qds: qualityFor(n)})
+		emit(func() error {
+			return asdu.MeasuredValueScaled(c, false, req, simCA, asdu.MeasuredValueScaledInfo{
+				Ioa: ioa, Value: s.scaled[n], Qds: qualityFor(n)})
+		})
 	case i >= ioaFloat && i < ioaFloat+nFloat:
 		n := i - ioaFloat
-		_ = asdu.MeasuredValueFloat(c, false, req, simCA, asdu.MeasuredValueFloatInfo{
-			Ioa: ioa, Value: s.floats[n], Qds: qualityFor(n)})
+		emit(func() error {
+			return asdu.MeasuredValueFloat(c, false, req, simCA, asdu.MeasuredValueFloatInfo{
+				Ioa: ioa, Value: s.floats[n], Qds: qualityFor(n)})
+		})
 	case i >= ioaPackedSCD && i < ioaPackedSCD+nPackedSCD:
 		n := i - ioaPackedSCD
-		_ = asdu.PackedSinglePointWithSCD(c, false, req, simCA,
-			asdu.PackedSinglePointWithSCDInfo{Ioa: ioa, Scd: s.scd[n], Qds: qualityFor(n)})
+		emit(func() error {
+			return asdu.PackedSinglePointWithSCD(c, false, req, simCA,
+				asdu.PackedSinglePointWithSCDInfo{Ioa: ioa, Scd: s.scd[n], Qds: qualityFor(n)})
+		})
 	default:
 		return false
 	}

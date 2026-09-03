@@ -31,6 +31,28 @@ func newTestModel(t *testing.T) (*Model, func()) {
 	return m, conn.stop
 }
 
+// nextMsg takes the next thing the interface would react to, with a deadline.
+// It prefers a pending batch exactly as connection.wait does, so tests drive
+// the same path the event loop does.
+func nextMsg(c *connection, d time.Duration) (tea.Msg, bool) {
+	if msg, ok := c.takeBatch(); ok {
+		return msg, true
+	}
+	select {
+	case <-c.batchWake:
+		if msg, ok := c.takeBatch(); ok {
+			return msg, true
+		}
+	case msg := <-c.out:
+		return msg, true
+	case <-time.After(d):
+	}
+	if msg, ok := c.takeBatch(); ok {
+		return msg, true
+	}
+	return nil, false
+}
+
 // pump drains everything the session has produced, with a deadline, so a test
 // can wait for the device to answer without sleeping blindly.
 func pump(t *testing.T, m *Model, until func() bool, deadline time.Duration) bool {
@@ -40,11 +62,9 @@ func pump(t *testing.T, m *Model, until func() bool, deadline time.Duration) boo
 		if until() {
 			return true
 		}
-		select {
-		case msg := <-m.conn.out:
+		if msg, ok := nextMsg(m.conn, 20*time.Millisecond); ok {
 			m.now = time.Now()
 			m.Update(msg)
-		case <-time.After(20 * time.Millisecond):
 		}
 	}
 	return until()

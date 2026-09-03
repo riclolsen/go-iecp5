@@ -32,9 +32,11 @@ func main() {
 		timeout   = flag.Duration("timeout", 30*time.Second, "connect timeout (t0)")
 		reconnect = flag.Duration("reconnect", 10*time.Second, "reconnect interval")
 
-		mouse  = flag.Bool("mouse", true, "enable the mouse")
-		inline = flag.Bool("inline", false, "draw inline instead of taking the whole terminal")
-		stale  = flag.Duration("stale", 30*time.Second, "fade points not updated for this long; 0 disables")
+		mouse   = flag.Bool("mouse", true, "enable the mouse")
+		inline  = flag.Bool("inline", false, "draw inline instead of taking the whole terminal")
+		stale   = flag.Duration("stale", 30*time.Second, "fade points not updated for this long; 0 disables")
+		history = flag.Int("history", defaultHistory,
+			"how many arrivals the event list keeps; 0 keeps everything. One general interrogation of an N object device produces N arrivals")
 		outDir = flag.String("file-dir", defaultDownloadDir, "directory completed file transfers are written to")
 
 		direct    = flag.Bool("direct", false, "direct execute instead of select before execute")
@@ -94,6 +96,10 @@ func main() {
 	m.mouse = *mouse
 	m.altmode = !*inline
 	m.staleAge = *stale
+	m.history = *history
+	if m.history < 0 {
+		m.history = 0
+	}
 	m.files.dir = *outDir
 
 	if err := conn.start(); err != nil {

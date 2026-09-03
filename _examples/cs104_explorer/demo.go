@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"math/rand"
@@ -175,6 +176,14 @@ func (d *demoServer) simulate(done <-chan struct{}) {
 
 // snapshot is everything the device knows, as an interrogation reply.
 func (d *demoServer) snapshot(c asdu.Connect, cause asdu.CauseOfTransmission) {
+	// cs104's Send does not block: a full send buffer refuses the ASDU
+	// rather than queueing it. This database is small enough never to fill
+	// it, but an interrogation reply is exactly where a real one would, so
+	// the reply waits for room instead of discarding points.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	c = cs104.Waiting(ctx, c)
+
 	d.mu.Lock()
 	single, double := d.single, d.double
 	floats, scaled := d.floats, d.scaled

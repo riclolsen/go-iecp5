@@ -7,6 +7,8 @@ package cs104
 import (
 	"context"
 	"crypto/tls"
+	"errors"
+	"fmt"
 	"net"
 	"sync"
 	"time"
@@ -151,13 +153,105 @@ func (sf *Server) Close() error {
 }
 
 // Send imp interface Connect
+// Send broadcasts an ASDU to every connected master.
+//
+// It reports an error when a session could not accept the ASDU: a session's
+// send buffer is finite and SrvSession.Send does not block, so a burst that
+// outruns the link is refused rather than queued. Every session is still
+// attempted, so one master that is not keeping up does not stop the others.
+//
+// Do not discard this error. An outstation that ignores it believes it
+// answered an interrogation in full while the master has holes it cannot
+// see, which is the hardest kind of fault to find from either end. Use
+// SendWait when the ASDU must go out even if the link is momentarily behind.
+//
+// A retry re-sends to the sessions that did accept the ASDU. When duplicates
+// matter, use SendWait, which retries only the sessions that refused it.
 func (sf *Server) Send(a *asdu.ASDU) error {
 	sf.mux.Lock()
+	var total, failed int
+	var firstErr error
 	for k := range sf.sessions {
-		_ = k.Send(a.Clone())
+		total++
+		if err := k.Send(a.Clone()); err != nil {
+			failed++
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
 	}
 	sf.mux.Unlock()
-	return nil
+
+	switch {
+	case failed == 0:
+		return nil
+	case failed == total:
+		return firstErr
+	default:
+		return fmt.Errorf("%d of %d sessions could not accept the ASDU: %w",
+			failed, total, firstErr)
+	}
+}
+
+// SendWait broadcasts an ASDU, waiting for room when a session's send buffer
+// is full rather than losing the ASDU for that master.
+//
+// Each session is retried on its own, so a session that already accepted the
+// ASDU never receives it twice. Waiting is usually what an outstation wants:
+// the buffer drains as the master acknowledges, so a full buffer means the
+// link is momentarily behind, not that the data is unwanted.
+//
+// It gives up on a session when ctx is done, and reports how many sessions
+// never took it.
+func (sf *Server) SendWait(ctx context.Context, a *asdu.ASDU) error {
+	const retry = 2 * time.Millisecond
+
+	sf.mux.Lock()
+	sessions := make([]*SrvSession, 0, len(sf.sessions))
+	for k := range sf.sessions {
+		sessions = append(sessions, k)
+	}
+	sf.mux.Unlock()
+
+	var failed int
+	var firstErr error
+	for _, sess := range sessions {
+		for {
+			err := sess.Send(a.Clone())
+			if err == nil {
+				break
+			}
+			if !errors.Is(err, ErrBufferFulled) {
+				// A closed connection or a malformed ASDU will not be fixed
+				// by waiting.
+				failed++
+				if firstErr == nil {
+					firstErr = err
+				}
+				break
+			}
+			select {
+			case <-ctx.Done():
+				failed++
+				if firstErr == nil {
+					firstErr = fmt.Errorf("send buffer full: %w", ctx.Err())
+				}
+			case <-time.After(retry):
+				continue
+			}
+			break
+		}
+	}
+
+	switch {
+	case failed == 0:
+		return nil
+	case failed == len(sessions):
+		return firstErr
+	default:
+		return fmt.Errorf("%d of %d sessions could not accept the ASDU: %w",
+			failed, len(sessions), firstErr)
+	}
 }
 
 // Params imp interface Connect

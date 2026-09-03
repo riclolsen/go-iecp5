@@ -95,8 +95,16 @@ type logRow struct {
 }
 
 const (
-	maxEvents = 5000
-	maxLogs   = 5000
+	// defaultHistory is how many arrivals the event list keeps.
+	//
+	// The point table keeps every information object a device reports; the
+	// event list is a window on the order they arrived in, and a window has
+	// to end somewhere. It ends well past one interrogation of a large
+	// database: a 15000 object device produces 15000 arrivals on every
+	// general interrogation, and a window shorter than that throws away
+	// most of what the operator asked for. Override with -history.
+	defaultHistory = 100000
+	maxLogs        = 5000
 )
 
 // Model is the whole interface state.
@@ -166,6 +174,12 @@ type Model struct {
 	cmdOK   uint64
 	cmdFail uint64
 
+	// history is how many arrivals the event list keeps, and
+	// eventsDropped/logsDropped are what fell off the end of each window.
+	history       int
+	eventsDropped uint64
+	logsDropped   uint64
+
 	// rate counts ASDUs in 500ms buckets over the last ten seconds, and
 	// rateHist keeps the resulting number for a minute: a device that has
 	// gone quiet looks exactly like a healthy idle one until you can see
@@ -187,6 +201,7 @@ func NewModel(conn *connection) *Model {
 		follow:    true,
 		status:    "connecting",
 		sortBy:    sortPoint,
+		history:   defaultHistory,
 		confirm:   true,
 		sbo:       true,
 		qoc:       asdu.QOCShortPulseDuration,
@@ -568,16 +583,19 @@ func (m *Model) selectedPoint() (*pointState, bool) {
 
 // ---------- data in ----------
 
+// applyUpdate takes one batch of arrivals. A batch may hold many ASDUs, so
+// the counters and the rate are advanced by how many the device actually
+// sent rather than by how many times the interface woke up.
 func (m *Model) applyUpdate(u updateMsg) {
-	m.rxASDU++
-	m.rate[m.rateIdx]++
+	m.rxASDU += u.asdus
+	m.rate[m.rateIdx] += int(u.asdus)
 	m.rxItems += uint64(len(u.rows))
 
 	if u.summary != "" {
 		m.addLog("rx", u.summary)
 	}
-	if u.feedback != nil {
-		m.applyCommandFeedback(*u.feedback, u.at)
+	for _, fb := range u.feedbacks {
+		m.applyCommandFeedback(fb, u.at)
 	}
 
 	for _, r := range u.rows {
@@ -610,8 +628,13 @@ func (m *Model) applyUpdate(u updateMsg) {
 			Value: r.Value, Qds: r.Qds, HasQ: r.HasQds, Stamp: r.Stamp,
 		})
 	}
-	if len(m.events) > maxEvents {
-		m.events = m.events[len(m.events)-maxEvents:]
+	// Trimming the window is not a silent operation: what fell off the end
+	// is counted and shown, because an event list that quietly forgets is
+	// one you cannot use to say what a device did.
+	if m.history > 0 && len(m.events) > m.history {
+		n := len(m.events) - m.history
+		m.events = m.events[n:]
+		m.eventsDropped += uint64(n)
 	}
 }
 
@@ -622,7 +645,9 @@ func (m *Model) addLog(level, text string) {
 	}
 	m.logs = append(m.logs, logRow{At: at, Level: level, Text: text})
 	if len(m.logs) > maxLogs {
-		m.logs = m.logs[len(m.logs)-maxLogs:]
+		n := len(m.logs) - maxLogs
+		m.logs = m.logs[n:]
+		m.logsDropped += uint64(n)
 	}
 }
 

@@ -12,6 +12,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
@@ -35,10 +36,11 @@ func main() {
 		period = flag.Duration("period", time.Second, "how often the process advances and reports")
 		quiet  = flag.Bool("quiet", false, "do not log the protocol")
 		offer  = flag.Bool("offer-file", true, "announce the disturbance record after a master connects")
+		scale  = flag.Int("scale", 1, "repeat the whole address plan this many times, at 10000 address strides — for testing a master against a large database")
 	)
 	flag.Parse()
 
-	sim := newSim()
+	sim := newSim(*scale)
 	store := seedFiles()
 	h := &handler{
 		sim:    sim,
@@ -67,6 +69,8 @@ func main() {
 	srv.SetConnectionLostHandler(func(c asdu.Connect) {
 		log.Println("master disconnected")
 		h.sel.clear()
+		ok, errs := sendStats()
+		log.Printf("sends: %d succeeded, %d failed", ok, errs)
 	})
 
 	// The process runs whether or not anyone is watching; reports only go
@@ -77,14 +81,23 @@ func main() {
 		for range t.C {
 			sim.advance()
 			if srv.GetSessionsLen() > 0 {
-				sim.spontaneous(srv)
+				// The broadcast retries each session on its own, so a
+				// master that is behind does not cost the others their
+				// data and does not get duplicates.
+				ctx, cancel := context.WithTimeout(context.Background(), sendTimeout)
+				sim.spontaneous(srv.WaitingConn(ctx))
+				cancel()
 			}
 		}
 	}()
 
 	log.Printf("IEC 60870-5-104 outstation on %s", *listen)
 	log.Printf("common address %d · %d information objects · 2 files",
-		simCA, totalObjects())
+		simCA, totalObjects(*scale))
+	if *scale > 1 {
+		log.Printf("the address plan is repeated %d times at %d strides: the last copy starts at %d",
+			*scale, ioaStride, (*scale-1)*ioaStride)
+	}
 	log.Printf("commands at %d..%d — see commands.go for what each one moves",
 		ioaCmdSingle, ioaCmdBits)
 	if err := srv.ListenAndServer(*listen); err != nil {

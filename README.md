@@ -91,10 +91,41 @@ func main() {
 Push spontaneous data to all connected masters at any time:
 
 ```go
-_ = asdu.Single(srv, false,
+if err := asdu.Single(srv, false,
 	asdu.CauseOfTransmission{Cause: asdu.Spontaneous}, 1,
-	asdu.SinglePointInfo{Ioa: 100, Value: false, Time: time.Now()})
+	asdu.SinglePointInfo{Ioa: 100, Value: false, Time: time.Now()}); err != nil {
+	log.Printf("send: %v", err)
+}
 ```
+
+### Send does not block — do not discard its error
+
+A session's send buffer is finite, and `Send` refuses an ASDU with
+`cs104.ErrBufferFulled` rather than making a protocol goroutine wait. That is
+the right default, but it puts the burden on the caller, and the burden is
+easy to miss: `_ = asdu.MeasuredValueFloat(c, ...)` in an interrogation
+handler works perfectly on a small database and **silently loses ASDUs on a
+large one** — the outstation believes it answered in full while the master has
+holes it cannot detect.
+
+For bulk replies, wrap the connection so sends wait for room instead:
+
+```go
+ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+defer cancel()
+w := cs104.Waiting(ctx, c) // every send below waits rather than dropping
+
+for _, batch := range database {
+	if err := asdu.MeasuredValueFloat(w, false, cause, ca, batch...); err != nil {
+		return err
+	}
+}
+```
+
+Always bound it with a deadline, so a master that has stopped acknowledging
+cannot block a handler for ever. For broadcasts use `srv.SendWait(ctx, a)`,
+which retries only the sessions that refused the ASDU and so never duplicates
+to the ones that took it.
 
 ## Quick start: IEC 104 client (master / controlling station)
 

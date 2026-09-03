@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -27,9 +28,12 @@ type updateMsg struct {
 	at      time.Time
 	rows    []pointUpdate
 	summary string
-	// feedback is set when the ASDU is a mirrored control-direction reply,
+	// asdus is how many ASDUs were folded into this batch, so the counters
+	// and the rate still measure the device rather than the interface.
+	asdus uint64
+	// feedbacks are the mirrored control-direction replies in this batch,
 	// which is how a command reports what became of it.
-	feedback *cmdFeedback
+	feedbacks []cmdFeedback
 }
 
 // cmdFeedback is one mirrored reply to a command: which command, and what the
@@ -86,14 +90,98 @@ type connection struct {
 	out         chan tea.Msg
 	verboseFlag bool
 	downloadDir string
+
+	// Process data is accumulated rather than sent one message per ASDU.
+	//
+	// A large outstation answers an interrogation with hundreds of ASDUs in
+	// a few milliseconds, and Bubble Tea processes one message per update
+	// cycle with a render in between: pushing one message per ASDU into a
+	// bounded channel means the interface decides how much of the device's
+	// database it is willing to look at, and silently discards the rest.
+	// So the protocol goroutine appends to a batch and the interface takes
+	// the whole batch at once.
+	batchMu   sync.Mutex
+	batch     []pointUpdate
+	batchAt   time.Time
+	batchSum  string
+	batchN    uint64 // ASDUs folded into this batch
+	feedbacks []cmdFeedback
+	batchWake chan struct{}
+	drained   chan struct{}
+
+	// dropped counts what could not be delivered even so. It is displayed,
+	// because a diagnostic tool that loses data quietly is worse than one
+	// that is slow.
+	dropped uint64
 }
+
+// batchLimit is how many point updates may wait for the interface before the
+// protocol goroutine is made to wait for it.
+//
+// Waiting is the right answer rather than dropping: the cs104 client's
+// receive path blocks, so back-pressure reaches TCP, the master stops
+// acknowledging, and the outstation's k-window holds the data at the source
+// until the interface catches up. Nothing is lost, it only arrives later.
+const batchLimit = 100000
 
 func newConnection(lk link, downloadDir string) *connection {
 	return &connection{
 		lk:          lk,
 		out:         make(chan tea.Msg, 512),
+		batchWake:   make(chan struct{}, 1),
+		drained:     make(chan struct{}, 1),
 		downloadDir: downloadDir,
 	}
+}
+
+// queue folds one ASDU into the pending batch. It never drops.
+func (c *connection) queue(rows []pointUpdate, summary string, fb *cmdFeedback) {
+	c.batchMu.Lock()
+	for len(c.batch) >= batchLimit {
+		// The interface is a long way behind. Wait for it rather than
+		// deciding on its behalf which measurements do not matter.
+		c.batchMu.Unlock()
+		select {
+		case <-c.drained:
+		case <-time.After(250 * time.Millisecond):
+		}
+		c.batchMu.Lock()
+	}
+	c.batch = append(c.batch, rows...)
+	c.batchAt = time.Now()
+	c.batchN++
+	if summary != "" {
+		c.batchSum = summary
+	}
+	if fb != nil {
+		c.feedbacks = append(c.feedbacks, *fb)
+	}
+	c.batchMu.Unlock()
+
+	select {
+	case c.batchWake <- struct{}{}:
+	default: // already awake
+	}
+}
+
+// takeBatch hands the whole pending batch to the interface. It reports false
+// when there was nothing waiting, which happens when a wake-up races a take.
+func (c *connection) takeBatch() (updateMsg, bool) {
+	c.batchMu.Lock()
+	if c.batchN == 0 {
+		c.batchMu.Unlock()
+		return updateMsg{}, false
+	}
+	msg := updateMsg{at: c.batchAt, rows: c.batch, summary: c.batchSum,
+		asdus: c.batchN, feedbacks: c.feedbacks}
+	c.batch, c.feedbacks, c.batchN = nil, nil, 0
+	c.batchMu.Unlock()
+
+	select {
+	case c.drained <- struct{}{}:
+	default:
+	}
+	return msg, true
 }
 
 func (c *connection) target() string { return c.lk.target() }
@@ -128,13 +216,49 @@ func (c *connection) push(msg tea.Msg) {
 	select {
 	case c.out <- msg:
 	default:
+		atomic.AddUint64(&c.dropped, 1)
 	}
 }
 
-// wait is the command that pulls the next message from the session.
+// wait is the command that pulls the next thing the interface should react
+// to: a pending batch of process data, or a control message.
+//
+// The batch is preferred when one is waiting, so a burst is drawn in as few
+// renders as it takes rather than one render per ASDU.
 func (c *connection) wait() tea.Cmd {
-	return func() tea.Msg { return <-c.out }
+	return func() tea.Msg {
+		for {
+			select {
+			case <-c.batchWake:
+				if msg, ok := c.takeBatch(); ok {
+					return msg
+				}
+				continue // a wake with nothing behind it
+			default:
+			}
+			select {
+			case msg := <-c.out:
+				return msg
+			case <-c.batchWake:
+				if msg, ok := c.takeBatch(); ok {
+					return msg
+				}
+			}
+		}
+	}
 }
+
+// batchPending is how many point updates are waiting for the interface.
+// The event loop owns the model, so this is the only safe way for anything
+// else to tell whether the session has been drained.
+func (c *connection) batchPending() int {
+	c.batchMu.Lock()
+	defer c.batchMu.Unlock()
+	return len(c.batch)
+}
+
+// dropCount is what could not be delivered, for the interface to show.
+func (c *connection) dropCount() uint64 { return atomic.LoadUint64(&c.dropped) }
 
 // start brings the session up, including the in-process outstation in demo
 // mode. It returns an error only for a setup problem; a device that is simply
@@ -387,8 +511,7 @@ type sessionHandler struct{ c *connection }
 
 func (h *sessionHandler) ASDUHandlerAll(_ asdu.Connect, a *asdu.ASDU, _ *cs104.Server, _ int) error {
 	rows, summary := decodeASDU(a)
-	h.c.push(updateMsg{at: time.Now(), rows: rows, summary: summary,
-		feedback: commandFeedback(a)})
+	h.c.queue(rows, summary, commandFeedback(a))
 	return nil
 }
 

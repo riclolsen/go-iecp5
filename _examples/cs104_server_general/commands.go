@@ -95,9 +95,11 @@ func (h *handler) handleCommand(c asdu.Connect, a *asdu.ASDU) bool {
 			}
 			h.sim.setDouble(i, v)
 			ioa := asdu.InfoObjAddr(ioaDouble + i)
-			_ = asdu.Double(c, false,
-				asdu.CauseOfTransmission{Cause: asdu.ReturnInfoRemote}, simCA,
-				asdu.DoublePointInfo{Ioa: ioa, Value: v})
+			emit(func() error {
+				return asdu.Double(c, false,
+					asdu.CauseOfTransmission{Cause: asdu.ReturnInfoRemote}, simCA,
+					asdu.DoublePointInfo{Ioa: ioa, Value: v})
+			})
 			return ioa, fmt.Sprintf("double point %d := %v", ioa, v)
 		}, func(ioa asdu.InfoObjAddr) bool {
 			return ioa >= ioaCmdDouble && ioa < ioaCmdDouble+nCmdDouble
@@ -109,9 +111,11 @@ func (h *handler) handleCommand(c asdu.Connect, a *asdu.ASDU) bool {
 		h.operate(c, a, cmd.Ioa, cmd.Qoc.InSelect, func() (asdu.InfoObjAddr, string) {
 			step := h.sim.stepBy(0, cmd.Value == asdu.SCOStepUP)
 			ioa := asdu.InfoObjAddr(ioaStep)
-			_ = asdu.Step(c, false,
-				asdu.CauseOfTransmission{Cause: asdu.ReturnInfoRemote}, simCA,
-				asdu.StepPositionInfo{Ioa: ioa, Value: step})
+			emit(func() error {
+				return asdu.Step(c, false,
+					asdu.CauseOfTransmission{Cause: asdu.ReturnInfoRemote}, simCA,
+					asdu.StepPositionInfo{Ioa: ioa, Value: step})
+			})
 			return ioa, fmt.Sprintf("step position %d := %d", ioa, step.Val)
 		}, func(ioa asdu.InfoObjAddr) bool { return ioa == ioaCmdStep })
 		return true
@@ -121,9 +125,11 @@ func (h *handler) handleCommand(c asdu.Connect, a *asdu.ASDU) bool {
 		h.operate(c, a, cmd.Ioa, cmd.Qos.InSelect, func() (asdu.InfoObjAddr, string) {
 			h.sim.setNormal(0, cmd.Value)
 			ioa := asdu.InfoObjAddr(ioaNormal)
-			_ = asdu.MeasuredValueNormal(c, false,
-				asdu.CauseOfTransmission{Cause: asdu.ReturnInfoRemote}, simCA,
-				asdu.MeasuredValueNormalInfo{Ioa: ioa, Value: cmd.Value})
+			emit(func() error {
+				return asdu.MeasuredValueNormal(c, false,
+					asdu.CauseOfTransmission{Cause: asdu.ReturnInfoRemote}, simCA,
+					asdu.MeasuredValueNormalInfo{Ioa: ioa, Value: cmd.Value})
+			})
 			return ioa, fmt.Sprintf("normalized %d := %.5f", ioa, cmd.Value.Float64())
 		}, func(ioa asdu.InfoObjAddr) bool { return ioa == ioaCmdNormal })
 		return true
@@ -133,9 +139,11 @@ func (h *handler) handleCommand(c asdu.Connect, a *asdu.ASDU) bool {
 		h.operate(c, a, cmd.Ioa, cmd.Qos.InSelect, func() (asdu.InfoObjAddr, string) {
 			h.sim.setScaled(0, cmd.Value)
 			ioa := asdu.InfoObjAddr(ioaScaled)
-			_ = asdu.MeasuredValueScaled(c, false,
-				asdu.CauseOfTransmission{Cause: asdu.ReturnInfoRemote}, simCA,
-				asdu.MeasuredValueScaledInfo{Ioa: ioa, Value: cmd.Value})
+			emit(func() error {
+				return asdu.MeasuredValueScaled(c, false,
+					asdu.CauseOfTransmission{Cause: asdu.ReturnInfoRemote}, simCA,
+					asdu.MeasuredValueScaledInfo{Ioa: ioa, Value: cmd.Value})
+			})
 			return ioa, fmt.Sprintf("scaled %d := %d", ioa, cmd.Value)
 		}, func(ioa asdu.InfoObjAddr) bool { return ioa == ioaCmdScaled })
 		return true
@@ -145,9 +153,11 @@ func (h *handler) handleCommand(c asdu.Connect, a *asdu.ASDU) bool {
 		h.operate(c, a, cmd.Ioa, cmd.Qos.InSelect, func() (asdu.InfoObjAddr, string) {
 			h.sim.setFloat(0, cmd.Value)
 			ioa := asdu.InfoObjAddr(ioaFloat)
-			_ = asdu.MeasuredValueFloat(c, false,
-				asdu.CauseOfTransmission{Cause: asdu.ReturnInfoRemote}, simCA,
-				asdu.MeasuredValueFloatInfo{Ioa: ioa, Value: cmd.Value})
+			emit(func() error {
+				return asdu.MeasuredValueFloat(c, false,
+					asdu.CauseOfTransmission{Cause: asdu.ReturnInfoRemote}, simCA,
+					asdu.MeasuredValueFloatInfo{Ioa: ioa, Value: cmd.Value})
+			})
 			return ioa, fmt.Sprintf("short float %d := %g", ioa, cmd.Value)
 		}, func(ioa asdu.InfoObjAddr) bool { return ioa == ioaCmdFloat })
 		return true
@@ -158,9 +168,11 @@ func (h *handler) handleCommand(c asdu.Connect, a *asdu.ASDU) bool {
 		h.operate(c, a, cmd.Ioa, false, func() (asdu.InfoObjAddr, string) {
 			h.sim.setBits(0, cmd.Value)
 			ioa := asdu.InfoObjAddr(ioaBits)
-			_ = asdu.BitString32(c, false,
-				asdu.CauseOfTransmission{Cause: asdu.ReturnInfoRemote}, simCA,
-				asdu.BitString32Info{Ioa: ioa, Value: cmd.Value})
+			emit(func() error {
+				return asdu.BitString32(c, false,
+					asdu.CauseOfTransmission{Cause: asdu.ReturnInfoRemote}, simCA,
+					asdu.BitString32Info{Ioa: ioa, Value: cmd.Value})
+			})
 			return ioa, fmt.Sprintf("bit string %d := 0x%08X", ioa, cmd.Value)
 		}, func(ioa asdu.InfoObjAddr) bool { return ioa == ioaCmdBits })
 		return true
@@ -213,9 +225,11 @@ func (h *handler) operate(c asdu.Connect, a *asdu.ASDU, ioa asdu.InfoObjAddr,
 
 // returnSingle reports a single point back after a command moved it.
 func (h *handler) returnSingle(c asdu.Connect, ioa asdu.InfoObjAddr, v bool) {
-	_ = asdu.Single(c, false,
-		asdu.CauseOfTransmission{Cause: asdu.ReturnInfoRemote}, simCA,
-		asdu.SinglePointInfo{Ioa: ioa, Value: v})
+	emit(func() error {
+		return asdu.Single(c, false,
+			asdu.CauseOfTransmission{Cause: asdu.ReturnInfoRemote}, simCA,
+			asdu.SinglePointInfo{Ioa: ioa, Value: v})
+	})
 }
 
 // ---------- the simulation's setters ----------

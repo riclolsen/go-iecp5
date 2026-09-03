@@ -98,6 +98,12 @@ func (m *Model) viewTabs(l layout) string {
 	}
 	if m.screen.isTable() {
 		status = append(status, plural(l.total, m.rowNoun()))
+		// A window on a longer stream must say so. Otherwise "5000 events"
+		// after a 15000 object interrogation reads as the device having
+		// reported 5000 things.
+		if n := m.screenDiscarded(); n > 0 {
+			status = append(status, stBad.Render(fmt.Sprintf("%d older discarded", n)))
+		}
 	}
 	if m.screen.follows() && m.follow {
 		status = append(status, "following")
@@ -376,6 +382,18 @@ func (m *Model) overviewSession() []string {
 	}
 }
 
+// screenDiscarded is how many rows fell off the end of the window behind the
+// current screen.
+func (m *Model) screenDiscarded() uint64 {
+	switch m.screen {
+	case ScreenEvents:
+		return m.eventsDropped
+	case ScreenLog:
+		return m.logsDropped
+	}
+	return 0
+}
+
 func (m *Model) overviewTraffic() []string {
 	return []string{
 		field("ASDUs in", fmt.Sprint(m.rxASDU)),
@@ -385,7 +403,34 @@ func (m *Model) overviewTraffic() []string {
 		field("Trend", sparkline(m.rateHist, 24)),
 		field("Commands", fmt.Sprintf("%d sent · %s · %s",
 			m.cmdSent, okText(m.cmdOK), failedText(m.cmdFail))),
+		field("Dropped", droppedText(m.conn.dropCount())),
+		field("History", m.historyText()),
 	}
+}
+
+// historyText says how much of the arrival order is still on hand. The point
+// table keeps every object a device reports; this is the event window.
+func (m *Model) historyText() string {
+	kept := len(m.events)
+	if m.eventsDropped == 0 {
+		return fmt.Sprintf("%d events kept, none discarded", kept)
+	}
+	return fmt.Sprintf("%d events kept, %s",
+		kept, stBad.Render(fmt.Sprintf("%d discarded — raise -history", m.eventsDropped)))
+}
+
+// droppedText reports messages the interface could not take.
+//
+// Process data is never dropped — arrivals are batched, and a batch that
+// outgrows its limit makes the protocol goroutine wait so back-pressure
+// reaches the outstation instead. This counts what is deliberately
+// droppable: log and status messages. It is shown because a tool that loses
+// anything quietly is not one you can trust about what a device sent.
+func droppedText(n uint64) string {
+	if n == 0 {
+		return "none"
+	}
+	return stBad.Render(fmt.Sprintf("%d log/status messages", n))
 }
 
 func okText(n uint64) string {
@@ -445,7 +490,13 @@ func (m *Model) overviewDatabase() []string {
 		field("Other", fmt.Sprint(other)),
 		field("Quality", qualityLine),
 		field("Stale", staleLine),
-		field("Events", fmt.Sprint(len(m.events))),
+		field("Events", func() string {
+			if m.eventsDropped == 0 {
+				return fmt.Sprint(len(m.events))
+			}
+			return fmt.Sprintf("%d %s", len(m.events),
+				stBad.Render(fmt.Sprintf("(+%d discarded)", m.eventsDropped)))
+		}()),
 	}
 }
 
@@ -939,6 +990,12 @@ func helpLines() []string {
 	}
 	return []string{
 		section("Screens"),
+		"  The Points table keeps every information object the device reports.",
+		"  The Events list is a window on the order they arrived in: one",
+		"  interrogation of an N object device produces N arrivals. When the",
+		"  window trims, the tab bar says how many were discarded — raise",
+		"  -history, or -history 0 to keep everything.",
+		"",
 		key("1-6, tab", "switch screens"),
 		key("?", "this reference"),
 		key("q, ctrl+c", "quit"),
