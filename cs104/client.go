@@ -394,7 +394,15 @@ func (sf *Client) run(ctx context.Context) {
 
 		case apdu := <-sf.rcvRaw:
 			idleTimeout3Sine = time.Now() // Every time an i frame, S frame, U frame is received, the idle timer is reset, t3
-			apci, asduVal := parse(apdu)
+			apci, asduVal, err := parse(apdu)
+			if err != nil {
+				// A malformed control field is not acted on. Ignoring it
+				// rather than closing the link keeps a peer from being able
+				// to drop the connection with a single bad frame; the log
+				// line is what makes the sender's fault visible.
+				sf.Error("%v, frame ignored [% x]", err, apdu)
+				continue
+			}
 			switch head := apci.(type) {
 			case sAPCI:
 				sf.Debug("RX sFrame %v", head)

@@ -1,6 +1,7 @@
 package cs104
 
 import (
+	"errors"
 	"reflect"
 	"testing"
 )
@@ -134,42 +135,98 @@ func Test_newUFrame(t *testing.T) {
 }
 
 func Test_parse(t *testing.T) {
-	type args struct {
-		apdu []byte
-	}
 	tests := []struct {
 		name  string
-		args  args
+		apdu  []byte
 		want  interface{}
 		want1 []byte
 	}{
 		{
+			// An I frame carries an ASDU, and bit 0 of the third control
+			// octet belongs to the format, not to the sequence number.
 			"iAPCI",
-			args{[]byte{startFrame, 0x04, 0x02, 0x00, 0x03, 0x00}},
+			[]byte{startFrame, 0x05, 0x02, 0x00, 0x02, 0x00, 0x64},
 			iAPCI{sendSN: 0x01, rcvSN: 0x01},
-			[]byte{},
+			[]byte{0x64},
 		},
 		{
 			"sAPCI",
-			args{[]byte{startFrame, 0x04, 0x01, 0x00, 0x02, 0x00}},
+			[]byte{startFrame, 0x04, 0x01, 0x00, 0x02, 0x00},
 			sAPCI{rcvSN: 0x01},
 			[]byte{},
 		},
 		{
 			"uAPCI",
-			args{[]byte{startFrame, 0x04, 0x07, 0x00, 0x00, 0x00}},
+			[]byte{startFrame, 0x04, 0x07, 0x00, 0x00, 0x00},
 			uAPCI{uStartDtActive},
 			[]byte{},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, got1 := parse(tt.args.apdu)
+			got, got1, err := parse(tt.apdu)
+			if err != nil {
+				t.Fatalf("parse() error = %v", err)
+			}
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("parse() got = %v, want %v", got, tt.want)
 			}
 			if !reflect.DeepEqual(got1, tt.want1) {
 				t.Errorf("parse() got1 = %v, want %v", got1, tt.want1)
+			}
+		})
+	}
+}
+
+// Test_parseRejectsMalformedAPCI: the S and U formats carry no payload to be
+// validated later, so whatever their control field says is acted on directly
+// — activating or deactivating data transfer, or moving the acknowledged
+// sequence number. parse is the only place a malformed one can be stopped.
+//
+// IEC 60870-5-104 subclause 5.1 fixes both formats at an APDU length of 4 and
+// requires every unused control bit to be zero.
+func Test_parseRejectsMalformedAPCI(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		apdu []byte
+	}{
+		{"truncated", []byte{startFrame, 0x04, 0x07}},
+		{"length field disagrees with the octets read",
+			[]byte{startFrame, 0x08, 0x01, 0x00, 0x02, 0x00}},
+
+		{"U format with reserved octets set",
+			[]byte{startFrame, 0x04, 0x07, 0xFF, 0xFF, 0xFF}},
+		{"U format with one reserved octet set",
+			[]byte{startFrame, 0x04, 0x07, 0x00, 0x01, 0x00}},
+		{"U format with length 10",
+			[]byte{startFrame, 0x0A, 0x07, 0x00, 0x00, 0x00,
+				0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA}},
+		{"U format with two function bits set",
+			[]byte{startFrame, 0x04, 0x0F, 0x00, 0x00, 0x00}},
+		{"U format with no function bit set",
+			[]byte{startFrame, 0x04, 0x03, 0x00, 0x00, 0x00}},
+
+		{"S format with second control octet set",
+			[]byte{startFrame, 0x04, 0x01, 0xFF, 0x02, 0x00}},
+		{"S format with unused bits of the first octet set",
+			[]byte{startFrame, 0x04, 0xF1, 0x00, 0x02, 0x00}},
+		{"S format with the sequence format bit set",
+			[]byte{startFrame, 0x04, 0x01, 0x00, 0x03, 0x00}},
+		{"S format with length 8",
+			[]byte{startFrame, 0x08, 0x01, 0x00, 0x02, 0x00, 0xAA, 0xAA, 0xAA, 0xAA}},
+
+		{"I format with no ASDU",
+			[]byte{startFrame, 0x04, 0x02, 0x00, 0x02, 0x00}},
+		{"I format with the sequence format bit set",
+			[]byte{startFrame, 0x05, 0x02, 0x00, 0x03, 0x00, 0x64}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			apci, _, err := parse(tt.apdu)
+			if err == nil {
+				t.Fatalf("accepted as %T: % x", apci, tt.apdu)
+			}
+			if !errors.Is(err, ErrInvalidAPCI) {
+				t.Fatalf("wrong error: %v", err)
 			}
 		})
 	}

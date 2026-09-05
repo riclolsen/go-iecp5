@@ -5,6 +5,7 @@
 package cs104
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/riclolsen/go-iecp5/asdu"
@@ -116,22 +117,90 @@ type APCI struct {
 	ctr1, ctr2, ctr3, ctr4 byte
 }
 
-// return frame type , APCI, remain data
-func parse(apdu []byte) (interface{}, []byte) {
+// ErrInvalidAPCI reports an APDU whose control field is not one the standard
+// defines. The frame is not acted on: a peer must not be able to change the
+// state of the link with a frame it had no right to send.
+var ErrInvalidAPCI = errors.New("cs104: malformed APCI")
+
+// isValidUFunction reports whether exactly one of the six defined U-format
+// functions is selected. The function occupies the upper six bits as three
+// act/con pairs, and exactly one bit is set in a legal frame — a frame with
+// two of them set is not "both", it is malformed.
+func isValidUFunction(f byte) bool {
+	switch f {
+	case uStartDtActive, uStartDtConfirm, uStopDtActive, uStopDtConfirm,
+		uTestFrActive, uTestFrConfirm:
+		return true
+	}
+	return false
+}
+
+// parse returns the frame type, the ASDU that follows it, and an error when
+// the APCI is malformed.
+//
+// The checks matter because the S and U formats carry no payload to be
+// validated later: whatever the control field says is acted on directly, so
+// this is the only place a malformed one can be caught. IEC 60870-5-104
+// subclause 5.1 fixes both formats at an APDU length of 4 and requires every
+// unused control bit to be zero, and a frame that violates either was not
+// produced by a conforming peer.
+func parse(apdu []byte) (interface{}, []byte, error) {
+	if len(apdu) < 6 {
+		return nil, nil, fmt.Errorf("%w: %d octets, minimum 6", ErrInvalidAPCI, len(apdu))
+	}
 	apci := APCI{apdu[0], apdu[1], apdu[2], apdu[3], apdu[4], apdu[5]}
-	if apci.ctr1&0x01 == 0 {
+
+	// The length octet counts the control field and the ASDU, so it must
+	// describe exactly what was read.
+	if int(apci.apduFiledLen) != len(apdu)-2 {
+		return nil, nil, fmt.Errorf("%w: length field %d does not match %d octets read",
+			ErrInvalidAPCI, apci.apduFiledLen, len(apdu)-2)
+	}
+
+	switch {
+	case apci.ctr1&0x01 == 0: // I format
+		// An I frame carries an ASDU; one without a payload has nothing to
+		// say. The low bit of the third octet is the format bit of the
+		// receive sequence number and is always zero.
+		if apci.apduFiledLen <= APCICtlFiledSize {
+			return nil, nil, fmt.Errorf("%w: I format with no ASDU", ErrInvalidAPCI)
+		}
+		if apci.ctr3&0x01 != 0 {
+			return nil, nil, fmt.Errorf("%w: I format with control octet 3 = 0x%02X, bit 0 must be clear",
+				ErrInvalidAPCI, apci.ctr3)
+		}
 		return iAPCI{
 			sendSN: uint16(apci.ctr1)>>1 + uint16(apci.ctr2)<<7,
 			rcvSN:  uint16(apci.ctr3)>>1 + uint16(apci.ctr4)<<7,
-		}, apdu[6:]
-	}
-	if apci.ctr1&0x03 == 0x01 {
+		}, apdu[6:], nil
+
+	case apci.ctr1&0x03 == 0x01: // S format
+		if apci.apduFiledLen != APCICtlFiledSize {
+			return nil, nil, fmt.Errorf("%w: S format with length %d, must be %d",
+				ErrInvalidAPCI, apci.apduFiledLen, APCICtlFiledSize)
+		}
+		if apci.ctr1 != 0x01 || apci.ctr2 != 0 || apci.ctr3&0x01 != 0 {
+			return nil, nil, fmt.Errorf("%w: S format with control field %02X %02X %02X %02X, unused bits must be clear",
+				ErrInvalidAPCI, apci.ctr1, apci.ctr2, apci.ctr3, apci.ctr4)
+		}
 		return sAPCI{
 			rcvSN: uint16(apci.ctr3)>>1 + uint16(apci.ctr4)<<7,
-		}, apdu[6:]
+		}, apdu[6:], nil
+
+	default: // U format, apci.ctr1&0x03 == 0x03
+		if apci.apduFiledLen != APCICtlFiledSize {
+			return nil, nil, fmt.Errorf("%w: U format with length %d, must be %d",
+				ErrInvalidAPCI, apci.apduFiledLen, APCICtlFiledSize)
+		}
+		if apci.ctr2 != 0 || apci.ctr3 != 0 || apci.ctr4 != 0 {
+			return nil, nil, fmt.Errorf("%w: U format with reserved octets %02X %02X %02X, must be zero",
+				ErrInvalidAPCI, apci.ctr2, apci.ctr3, apci.ctr4)
+		}
+		function := apci.ctr1 & 0xfc
+		if !isValidUFunction(function) {
+			return nil, nil, fmt.Errorf("%w: U format function 0x%02X is not one of the six defined",
+				ErrInvalidAPCI, function)
+		}
+		return uAPCI{function: function}, apdu[6:], nil
 	}
-	// apci.ctrl&0x03 == 0x03
-	return uAPCI{
-		function: apci.ctr1 & 0xfc,
-	}, apdu[6:]
 }
