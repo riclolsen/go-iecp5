@@ -25,9 +25,28 @@ const (
 	// EndChar is the end character for frames (not standard FT1.2, but sometimes used)
 	EndChar byte = 0x16
 
-	// Max FTU Length (Frame Transfer Unit)
-	MaxFrameLen = 255
+	// MaxLengthField is the largest value the FT1.2 length octet can carry.
+	//
+	// In a variable-length frame — 68H L L 68H, control, link address, ASDU,
+	// checksum, 16H — the octet L counts the control field, the link address
+	// and the ASDU. It is one octet, so it runs to 255, and the largest ASDU
+	// is therefore MaxLengthField - 1 - linkAddrSize: 253 octets with a one
+	// octet link address, 252 with two. That 253 is the figure IEC 60870-5-103
+	// quotes as its maximum ASDU length.
+	MaxLengthField = 255
+
+	// MaxFrameLen is the largest variable-length frame on the wire:
+	// 68H L L 68H (4 octets) + L + checksum + 16H (2 octets), so 261 — not
+	// 255. Confusing the length field with the frame length costs six octets
+	// of every frame, which is enough to refuse a maximum-size ASDU.
+	MaxFrameLen = MaxLengthField + 6
 )
+
+// MaxASDULen is the largest ASDU that fits in one variable-length frame for
+// a given link address size.
+func MaxASDULen(linkAddrSize byte) int {
+	return MaxLengthField - 1 - int(linkAddrSize)
+}
 
 const (
 	// Control Field Bits (Primary Station Message)
@@ -285,10 +304,10 @@ func ParseFrame(r io.Reader, linkAddrSize byte, ctx *context.Context) (*Frame, e
 		if frame.Length1 < 1+linkAddrSize {
 			return nil, fmt.Errorf("%w: length %d less than control+link address size %d", ErrFrameTooShort, frame.Length1, 1+linkAddrSize)
 		}
-		// Check against overall max length (Start+L1+L2+Start2+Ctrl+CS+End = 7 bytes overhead)
-		if frame.Length1 > MaxFrameLen-6 {
-			return nil, fmt.Errorf("%w: L=%d", ErrFrameLenExceeded, frame.Length1)
-		}
+		// There is no upper bound left to check: Length1 is one octet, so it
+		// cannot exceed MaxLengthField, and every value up to it describes a
+		// legal frame of Length1+6 octets. Rejecting anything above 249 here
+		// refused the largest frames the standard defines.
 
 		// Read LinkAddr + ASDU + Checksum + End
 		bodyLen := -1 + int(frame.Length1) + 1 + 1 // (-Control) + LinkAddr + ASDU + Checksum + End
@@ -345,11 +364,17 @@ func (f *Frame) MarshalBinary(linkAddrSize byte) ([]byte, error) {
 	case StartVariable:
 		// Frame: Start(1) + Len1(1) + Len2(1) + Control(1) + LinkAddr(linkAddrSize) + ASDU(N) + Checksum(1) + End(1)
 		asduLen := len(f.ASDU)
-		frameLenField := byte(1 + int(linkAddrSize) + asduLen) // Length field = LinkAddr + ASDU length
-		// Check overall length constraint (Start+L1+L2+Start+Ctrl+CS+End = 6 bytes overhead)
-		if int(frameLenField) > MaxFrameLen-6 {
-			return nil, fmt.Errorf("%w: calculated L=%d", ErrFrameLenExceeded, frameLenField)
+		// The length field counts control + link address + ASDU. It is
+		// computed as an int and checked before it is narrowed to a byte:
+		// narrowing first would wrap a 256 octet total to L=0 and put a
+		// frame on the wire whose length field describes none of it.
+		lengthField := 1 + int(linkAddrSize) + asduLen
+		if lengthField > MaxLengthField {
+			return nil, fmt.Errorf("%w: calculated L=%d, maximum %d (ASDU %d octets, maximum %d for a %d octet link address)",
+				ErrFrameLenExceeded, lengthField, MaxLengthField,
+				asduLen, MaxASDULen(linkAddrSize), linkAddrSize)
 		}
+		frameLenField := byte(lengthField)
 
 		buf := make([]byte, 0)
 		buf = append(buf, StartVariable)
