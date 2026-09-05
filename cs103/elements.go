@@ -221,6 +221,13 @@ func ParseCP32Time2a(b []byte, loc *time.Location) time.Time {
 	min := int(b[2] & 0x3f)
 	hour := int(b[3] & 0x1f)
 
+	// The fields are wider than the ranges the standard defines, and
+	// time.Date normalises a surplus into a neighbouring instant instead of
+	// refusing it — which turns a malformed tag into a plausible event time.
+	if x >= 60000 || min > 59 || hour > 23 {
+		return time.Time{}
+	}
+
 	if loc == nil {
 		loc = time.UTC
 	}

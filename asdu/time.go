@@ -103,13 +103,31 @@ func ParseCP56Time2a(bytes []byte, loc *time.Location) time.Time {
 	month := time.Month(bytes[5] & 0x0f)
 	year := 2000 + int(bytes[6]&0x7f)
 
+	// Every field is wider than the range the standard defines for it, so a
+	// value outside that range is a fault in the sender, not a time. Left to
+	// time.Date these do not fail: they are normalised into a neighbouring
+	// instant that looks perfectly ordinary — month 0 becomes December of
+	// the previous year, hour 31 becomes 07:30 the next day. An event log
+	// cannot show that as suspect, so it is refused here instead.
+	if x >= 60000 || min > 59 || hour > 23 ||
+		day < 1 || month < time.January || month > time.December || year > 2099 {
+		return time.Time{}
+	}
+
 	nsec := msec * int(time.Millisecond)
 	if loc == nil {
 		loc = time.UTC
 	}
-	return ResolveSummerTime(
-		time.Date(year, month, day, hour, min, sec, nsec, loc),
-		bytes[3]&0x80 != 0)
+	ts := time.Date(year, month, day, hour, min, sec, nsec, loc)
+
+	// A day the month does not have (31 April) is in range field by field,
+	// and so is a wall clock the zone skips when the clocks go forward.
+	// time.Date moves both; if anything moved, the reading was not a time.
+	if ts.Year() != year || ts.Month() != month || ts.Day() != day ||
+		ts.Hour() != hour || ts.Minute() != min || ts.Second() != sec {
+		return time.Time{}
+	}
+	return ResolveSummerTime(ts, bytes[3]&0x80 != 0)
 }
 
 // CP24Time2a time to CP56Time2a 3 octets binary time, UTC is recommended for all time scales
@@ -133,6 +151,13 @@ func ParseCP24Time2a(bytes []byte, loc *time.Location) time.Time {
 	msec := x % 1000
 	sec := (x / 1000)
 	min := int(bytes[2] & 0x3f)
+
+	// Milliseconds run to 59999 and minutes to 59; the fields are wider than
+	// that, and time.Date would roll a surplus into the next minute or hour
+	// rather than refusing it.
+	if x >= 60000 || min > 59 {
+		return time.Time{}
+	}
 
 	if loc == nil {
 		loc = time.UTC

@@ -58,3 +58,35 @@ func TestParseCP32Time2aIgnoresSUInTheHourValue(t *testing.T) {
 			moment.Format(time.RFC3339))
 	}
 }
+
+// CP32Time2a's fields are wider than their ranges too, and time.Date
+// normalises a surplus into a neighbouring instant rather than refusing it.
+func TestParseCP32Time2aRejectsOutOfRangeFields(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		raw  []byte
+	}{
+		{"milliseconds 60000", []byte{0x60, 0xEA, 30, 14}},
+		{"milliseconds 65535", []byte{0xFF, 0xFF, 30, 14}},
+		{"minute 60", []byte{0xF4, 0x01, 60, 14}},
+		{"minute 63", []byte{0xF4, 0x01, 63, 14}},
+		{"hour 24", []byte{0xF4, 0x01, 30, 24}},
+		{"hour 31", []byte{0xF4, 0x01, 30, 31}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ParseCP32Time2a(tt.raw, time.UTC); !got.IsZero() {
+				t.Errorf("accepted as %s", got.Format(time.RFC3339Nano))
+			}
+		})
+	}
+
+	// The boundaries are still valid.
+	for _, raw := range [][]byte{
+		{0x5F, 0xEA, 59, 23}, // 23:59:59.999
+		{0x00, 0x00, 0, 0},   // 00:00:00.000
+	} {
+		if got := ParseCP32Time2a(raw, time.UTC); got.IsZero() {
+			t.Errorf("% x was rejected", raw)
+		}
+	}
+}

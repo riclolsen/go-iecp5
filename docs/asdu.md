@@ -287,6 +287,34 @@ _ = pack.SendReplyMirror(c, asdu.ActivationCon)
 _ = pack.SendReplyMirror(c, asdu.UnknownTypeID) // also UnknownCOT / UnknownCA / UnknownIOA
 ```
 
+## Invalid time tags
+
+Every field of a CP-series tag is carried in more bits than its range needs:
+milliseconds run to 59999 in sixteen bits, minutes to 59 in six, hours to 23
+in five, months to 12 in four, years to 99 in seven.
+
+A value outside its range is a fault in the sender, not a time, and the
+decoders return the **zero time** for it — the same signal they already use
+for the IV (invalid) bit and for a truncated tag. Check `IsZero()`.
+
+This matters because the alternative is not a visible failure. `time.Date`
+normalises an out-of-range field into a neighbouring instant that reads as
+perfectly ordinary:
+
+| Tag | Normalises to |
+| --- | --- |
+| month 0 | December of the *previous year* |
+| month 13 | January of the next year |
+| hour 31 | 07:30 the next day |
+| day 0 | the last day of the previous month |
+| 31 April | 1 May |
+| milliseconds 65535 | one minute and five seconds later |
+
+None of those look suspect in an event log. The decoders also refuse a date
+the calendar does not have (31 April, 29 February in a common year) and a
+wall clock the configured zone skips when the clocks go forward, both of
+which are in range field by field.
+
 ## Summer time (the SU bit)
 
 Bit 7 of the hour octet of `CP56Time2a` (and of `cs103`'s `CP32Time2a`) is SU:
