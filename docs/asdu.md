@@ -287,6 +287,31 @@ _ = pack.SendReplyMirror(c, asdu.ActivationCon)
 _ = pack.SendReplyMirror(c, asdu.UnknownTypeID) // also UnknownCOT / UnknownCA / UnknownIOA
 ```
 
+## What MarshalBinary refuses
+
+An ASDU built by hand with `NewASDU` is only as well formed as the caller
+made it, so `MarshalBinary` checks it before it can reach a wire:
+
+| Refused | Error |
+| --- | --- |
+| type identification 0 | `ErrTypeIDZero` |
+| a variable structure qualifier claiming no objects | `ErrInfoObjCountZero` |
+| a payload that is not what the qualifier and type imply | `ErrInfoObjSizeMismatch` |
+| more than `ASDUSizeMax` (249) octets in total | `ErrLengthOutOfRange` |
+
+The size check is the one that changes behaviour furthest downstream. Without
+it, `cs104`'s `Send` accepted an oversized ASDU, **returned nil**, queued it,
+and the frame builder then discarded it because it could not fit an APDU —
+leaving the caller believing its data had gone out. Refusing at marshal time
+is early enough for `Send` to return the error to the caller.
+
+The payload check applies only where the object size is defined. Type
+identifications in the private range (128-255) have none, so their payloads
+are marshalled on the caller's word; the size limit still applies to them.
+
+The monitor- and control-direction helpers in this package build the payload
+and the qualifier together, so they cannot produce any of these.
+
 ## Invalid time tags
 
 Every field of a CP-series tag is carried in more bits than its range needs:

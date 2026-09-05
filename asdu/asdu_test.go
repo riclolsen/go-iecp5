@@ -235,12 +235,14 @@ func TestASDU_MarshalBinary(t *testing.T) {
 				ParamsNarrow,
 				Identifier{
 					M_SP_NA_1,
-					VariableStruct{Number: 1},
+					// A narrow information object address is one octet, so an
+					// M_SP_NA_1 object is two: this payload is two of them.
+					VariableStruct{Number: 2},
 					CauseOfTransmission{Cause: Activation},
 					0,
 					0x80},
 				[]byte{0x00, 0x01, 0x02, 0x03}},
-			[]byte{0x01, 0x01, 0x06, 0x80, 0x00, 0x01, 0x02, 0x03},
+			[]byte{0x01, 0x02, 0x06, 0x80, 0x00, 0x01, 0x02, 0x03},
 			false,
 		},
 		{
@@ -249,12 +251,12 @@ func TestASDU_MarshalBinary(t *testing.T) {
 				ParamsNarrow,
 				Identifier{
 					M_SP_NA_1,
-					VariableStruct{Number: 1},
+					VariableStruct{Number: 2},
 					CauseOfTransmission{Cause: Activation},
 					0,
 					GlobalCommonAddr},
 				[]byte{0x00, 0x01, 0x02, 0x03}},
-			[]byte{0x01, 0x01, 0x06, 0xff, 0x00, 0x01, 0x02, 0x03},
+			[]byte{0x01, 0x02, 0x06, 0xff, 0x00, 0x01, 0x02, 0x03},
 			false,
 		},
 		{

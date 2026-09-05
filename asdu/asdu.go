@@ -576,6 +576,25 @@ func (sf *ASDU) MarshalBinary() (data []byte, err error) {
 		return nil, ErrParam
 	case sf.CommonAddrSize == 1 && sf.CommonAddr != GlobalCommonAddr && sf.CommonAddr >= 255:
 		return nil, ErrParam
+	case sf.Type == 0:
+		return nil, ErrTypeIDZero
+	case sf.Variable.Number == 0:
+		return nil, ErrInfoObjCountZero
+	case sf.IdentifierSize()+len(sf.InfoObj) > ASDUSizeMax:
+		// Refusing here is what lets the caller find out. Left to the
+		// transport, an oversized ASDU is accepted by Send, queued, and then
+		// dropped by the frame builder that cannot carry it — with Send
+		// having already reported success.
+		return nil, ErrLengthOutOfRange
+	}
+
+	// The payload must be what the qualifier and the type say it is. This is
+	// only checkable for a type whose object size is known: the private range
+	// (128-255) has no entry, and refusing those would make the private range
+	// unusable, so they are marshalled on the caller's word.
+	if want, known := sf.expectedInfoObjLen(); known && want != len(sf.InfoObj) {
+		return nil, fmt.Errorf("%w: %s with %d object(s) needs %d octets, has %d",
+			ErrInfoObjSizeMismatch, sf.Type, sf.Variable.Number, want, len(sf.InfoObj))
 	}
 
 	raw := make([]byte, sf.IdentifierSize()+len(sf.InfoObj))
@@ -660,6 +679,30 @@ func (sf *ASDU) variableInfoObjSize() (int, bool) {
 		return 0, true // recognized, but truncated: reported as io.EOF
 	}
 	return headSize + int(sf.InfoObj[sf.InfoObjAddrSize+3]), true
+}
+
+// expectedInfoObjLen returns how many information object octets this ASDU's
+// qualifier and type identification call for, and whether that is knowable.
+//
+// It is not knowable for a type outside the compatible range, whose object
+// size the standard does not define.
+func (sf *ASDU) expectedInfoObjLen() (int, bool) {
+	if size, isVariable := sf.variableInfoObjSize(); isVariable {
+		// A variable-length object carries its own length, so "expected" is
+		// only meaningful once that octet is present.
+		if size == 0 {
+			return 0, false
+		}
+		return size, true
+	}
+	objSize, err := GetInfoObjSize(sf.Type)
+	if err != nil {
+		return 0, false
+	}
+	if sf.Variable.IsSequence {
+		return sf.InfoObjAddrSize + int(sf.Variable.Number)*objSize, true
+	}
+	return int(sf.Variable.Number) * (sf.InfoObjAddrSize + objSize), true
 }
 
 // FixInfoObjSize fix information object size

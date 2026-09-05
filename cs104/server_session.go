@@ -206,7 +206,11 @@ func (sf *SrvSession) run(ctx context.Context) {
 
 		iframe, err := newIFrame(seqNo, sf.seqNoRcv, asdu1)
 		if err != nil {
-			return
+			// MarshalBinary refuses an oversized ASDU, so this should be
+			// unreachable. Saying so anyway is the point: an ASDU accepted
+			// for sending and then vanishing here would leave the caller
+			// believing its data went out.
+			sf.Error("dropping an ASDU that will not fit an APDU: %v", err)
 		}
 		sf.ackNoRcv = sf.seqNoRcv
 		sf.seqNoSend = (seqNo + 1) & 32767

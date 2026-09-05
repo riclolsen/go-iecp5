@@ -31,6 +31,19 @@ var (
 	ErrTrailingOctets  = errors.New("asdu: information objects longer than the variable structure qualifier accounts for")
 	ErrInroGroupNumFit = errors.New("asdu: interrogation group number exceeds 16")
 
+	// ErrTypeIDZero reports type identification 0, which no range of the
+	// standard defines — not the compatible range, not the private one.
+	ErrTypeIDZero = errors.New("asdu: type identification 0 is not defined")
+	// ErrInfoObjCountZero reports a variable structure qualifier claiming no
+	// information objects. An ASDU exists to carry them; one that says it
+	// carries none has nothing to say and no receiver can act on it.
+	ErrInfoObjCountZero = errors.New("asdu: variable structure qualifier claims 0 information objects")
+	// ErrInfoObjSizeMismatch reports a payload that does not match what the
+	// variable structure qualifier and the type identification imply. Sending
+	// one produces an ASDU the receiver must reject, so it is refused here
+	// where the caller can still be told which side is wrong.
+	ErrInfoObjSizeMismatch = errors.New("asdu: information object payload does not match the variable structure qualifier")
+
 	ErrLengthOutOfRange = fmt.Errorf("asdu: asdu filed length large than max %d", ASDUSizeMax)
 	ErrNotAnyObjInfo    = errors.New("asdu: not any object information")
 	ErrTypeIDNotMatch   = errors.New("asdu: type identifier doesn't match call or time tag")
