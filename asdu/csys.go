@@ -244,6 +244,11 @@ func TestCommandCP56Time2a(c Connect, coa CauseOfTransmission, ca CommonAddr, t 
 	if err := c.Params().Valid(); err != nil {
 		return err
 	}
+	// The control direction of a test command admits activation and nothing
+	// else, exactly as for the untagged C_TS_NA_1 above. Without this the
+	// caller's cause went out untouched, so a request, a spontaneous or even
+	// a monitor-direction error cause could be carried by a control ASDU.
+	coa.Cause = Activation
 	u := NewASDU(c.Params(), Identifier{
 		C_TS_TA_1,
 		VariableStruct{IsSequence: false, Number: 1},
