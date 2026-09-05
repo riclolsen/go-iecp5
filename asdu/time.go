@@ -31,8 +31,59 @@ func CP56Time2a(t time.Time, loc *time.Location) []byte {
 	if dow == 0 {
 		dow = 7
 	}
-	return []byte{byte(msec), byte(msec >> 8), byte(ts.Minute()), byte(ts.Hour()),
+	return []byte{byte(msec), byte(msec >> 8), byte(ts.Minute()), summerTimeHour(ts),
 		dow<<5 | byte(ts.Day()), byte(ts.Month()), byte(ts.Year() - 2000)}
+}
+
+// summerTimeHour builds the hour octet: the hour in D4-D0 and the SU flag in
+// D7. SU says the reading is expressed in summer time, which is what lets a
+// receiver resolve the hour that occurs twice when the clocks go back. It is
+// zero for UTC and for any fixed zone, because neither observes summer time.
+func summerTimeHour(ts time.Time) byte {
+	h := byte(ts.Hour())
+	if ts.IsDST() {
+		h |= 0x80
+	}
+	return h
+}
+
+// ResolveSummerTime picks the instant matching a CP56Time2a or CP32Time2a SU
+// (summer time) flag.
+//
+// A wall clock reading is ambiguous for one hour a year: when the clocks go
+// back the same local time occurs twice, once in summer time and once in
+// standard time. time.Date resolves that arbitrarily — the standard provides
+// the SU bit to settle it.
+//
+// It returns t unchanged when t already agrees with su, and when no instant
+// with the same wall clock reading agrees. The latter happens when the
+// sender's summer time rules differ from loc's, and there the wall clock is
+// the only thing the two ends agree on.
+func ResolveSummerTime(t time.Time, su bool) time.Time {
+	if t.IsDST() == su {
+		return t
+	}
+	y, mo, d := t.Date()
+	h, mi, s := t.Clock()
+	// A summer time offset is an hour almost everywhere and half an hour in
+	// a few places; the shifted instant is only the right one if it still
+	// reads as the same wall clock.
+	for _, delta := range []time.Duration{
+		-time.Hour, time.Hour,
+		-30 * time.Minute, 30 * time.Minute,
+		-2 * time.Hour, 2 * time.Hour,
+	} {
+		alt := t.Add(delta)
+		if alt.IsDST() != su {
+			continue
+		}
+		ay, amo, ad := alt.Date()
+		ah, ami, as := alt.Clock()
+		if ay == y && amo == mo && ad == d && ah == h && ami == mi && as == s {
+			return alt
+		}
+	}
+	return t
 }
 
 // ParseCP56Time2a 7 octets binary time, it is recommended to use UTC for all time stamps, read 7 bytes, return time
@@ -56,7 +107,9 @@ func ParseCP56Time2a(bytes []byte, loc *time.Location) time.Time {
 	if loc == nil {
 		loc = time.UTC
 	}
-	return time.Date(year, month, day, hour, min, sec, nsec, loc)
+	return ResolveSummerTime(
+		time.Date(year, month, day, hour, min, sec, nsec, loc),
+		bytes[3]&0x80 != 0)
 }
 
 // CP24Time2a time to CP56Time2a 3 octets binary time, UTC is recommended for all time scales

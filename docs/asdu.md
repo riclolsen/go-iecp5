@@ -287,6 +287,33 @@ _ = pack.SendReplyMirror(c, asdu.ActivationCon)
 _ = pack.SendReplyMirror(c, asdu.UnknownTypeID) // also UnknownCOT / UnknownCA / UnknownIOA
 ```
 
+## Summer time (the SU bit)
+
+Bit 7 of the hour octet of `CP56Time2a` (and of `cs103`'s `CP32Time2a`) is SU:
+the reading is expressed in summer time.
+
+```
+| SU(D7) | RES2(D6-D5) | Hours(D4-D0) |
+```
+
+The encoders set it from the configured `Params.InfoObjTimeZone`. It is zero
+for UTC — the default — and for any fixed zone, neither of which observes
+summer time, so a deployment that keeps its time tags in UTC is unaffected
+either way. It matters when `InfoObjTimeZone` is a zone that does observe it:
+without SU, every summer timestamp reads as standard time to a peer that
+honours the flag, an hour adrift in the direction that makes an event look
+like it preceded its cause.
+
+`ParseCP56Time2a` honours SU as well, which is what settles the hour that
+happens twice when the clocks go back: 02:30 occurs once in summer time and
+once in standard time, and `time.Date` alone resolves that ambiguity
+arbitrarily. `asdu.ResolveSummerTime` exposes that rule for other codecs. When
+the flag cannot be reconciled with the location — a sender whose summer time
+rules differ from yours — the wall clock reading is kept, since that is the
+only thing the two ends agree on.
+
+`CP24Time2a` has no hour octet and therefore no SU bit.
+
 ## Quality descriptors
 
 `QualityDescriptor` bit flags: `QDSGood` (0), `QDSOverflow`, `QDSBlocked`,

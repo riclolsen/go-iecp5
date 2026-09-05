@@ -198,7 +198,13 @@ func CP32Time2a(t time.Time, loc *time.Location) []byte {
 	}
 	ts := t.In(loc)
 	msec := ts.Nanosecond()/int(time.Millisecond) + ts.Second()*1000
-	return []byte{byte(msec), byte(msec >> 8), byte(ts.Minute()), byte(ts.Hour())}
+	// D7 of the hour octet is SU: the reading is expressed in summer time.
+	// It is zero for UTC and for any fixed zone, neither of which observes it.
+	hour := byte(ts.Hour())
+	if ts.IsDST() {
+		hour |= 0x80
+	}
+	return []byte{byte(msec), byte(msec >> 8), byte(ts.Minute()), hour}
 }
 
 // ParseCP32Time2a decodes a 4-octet binary time. The date is taken from the
@@ -224,7 +230,7 @@ func ParseCP32Time2a(b []byte, loc *time.Location) time.Time {
 	if val.After(now.Add(5 * time.Minute)) {
 		val = val.AddDate(0, 0, -1)
 	}
-	return val
+	return asdu.ResolveSummerTime(val, b[3]&0x80 != 0)
 }
 
 // --- decoded information object structs and getters ---
