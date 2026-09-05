@@ -210,6 +210,32 @@ asdu.DelayAcquireCommand(c, coa, ca, msec)                // IEC 101 only
 asdu.ParameterNormal(c, coa, ca, asdu.ParameterNormalInfo{...}) // and Scaled/Float/Activation
 ```
 
+## Length integrity on decode
+
+`UnmarshalBinary` requires an ASDU's information objects to be exactly as long
+as its variable structure qualifier accounts for.
+
+Nothing legitimate produces a surplus octet: the frame fixes the total length,
+the qualifier fixes the object count, and the type identification fixes the
+object size (or, for `F_SG_NA_1`, its own length-of-segment octet does). An
+ASDU that carries more was not produced by a conforming sender, and accepting
+it means executing the part that parsed while discarding the rest unseen — a
+control ASDU of one valid command followed by anything at all would reach the
+handler and be acted on.
+
+Such an ASDU is rejected with `ErrTrailingOctets`, which names the type, the
+octets carried and the octets accounted for. Too *few* octets remains
+`io.EOF`, as before.
+
+If a device in the field is known to pad, set `Params.AllowTrailingOctets` to
+restore the old behaviour for that link, knowing that a truncated reply then
+looks the same as a complete one:
+
+```go
+p := *asdu.ParamsWide
+p.AllowTrailingOctets = true
+```
+
 ## Decoding received ASDUs (getters)
 
 On the receiving side, switch on `pack.Type` and call the matching getter.

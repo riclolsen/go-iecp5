@@ -62,6 +62,20 @@ type Params struct {
 	// InfoObjTimeZone controls the time tag interpretation.
 	// The standard fails to mention this one.
 	InfoObjTimeZone *time.Location
+
+	// AllowTrailingOctets accepts an ASDU whose information objects are
+	// longer than its variable structure qualifier accounts for, silently
+	// discarding the surplus.
+	//
+	// The default — reject — is what the standard implies: an ASDU's length
+	// is fixed by the frame that carries it, its object count by the
+	// qualifier and its object size by the type identification, so a
+	// conforming sender cannot produce a surplus octet. Discarding one means
+	// executing a command that arrived in a frame nobody can account for.
+	//
+	// Set this only for a device that is known to pad, and knowing that a
+	// truncated interrogation reply then looks the same as a complete one.
+	AllowTrailingOctets bool
 }
 
 // Valid returns the validation result of params.
@@ -655,7 +669,11 @@ func (sf *ASDU) FixInfoObjSize() error {
 		switch {
 		case size == 0 || size > len(sf.InfoObj):
 			return io.EOF
-		case size < len(sf.InfoObj): // not explicitly prohibited
+		case size < len(sf.InfoObj):
+			if !sf.AllowTrailingOctets {
+				return fmt.Errorf("%w: %s carries %d octets, its length of segment accounts for %d",
+					ErrTrailingOctets, sf.Type, len(sf.InfoObj), size)
+			}
 			sf.InfoObj = sf.InfoObj[:size]
 		}
 		return nil
@@ -680,7 +698,11 @@ func (sf *ASDU) FixInfoObjSize() error {
 		return ErrInfoObjIndexFit
 	case size > len(sf.InfoObj):
 		return io.EOF
-	case size < len(sf.InfoObj): // not explicitly prohibited
+	case size < len(sf.InfoObj):
+		if !sf.AllowTrailingOctets {
+			return fmt.Errorf("%w: %s with %d object(s) carries %d octets, %d accounted for",
+				ErrTrailingOctets, sf.Type, sf.Variable.Number, len(sf.InfoObj), size)
+		}
 		sf.InfoObj = sf.InfoObj[:size]
 	}
 

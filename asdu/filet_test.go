@@ -2,6 +2,7 @@ package asdu
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"reflect"
 	"testing"
@@ -185,7 +186,10 @@ func TestFileSegmentVariableLength(t *testing.T) {
 	}{
 		{"exact", append(append([]byte{}, head...), 0x02, 0x11, 0x22), nil, 2},
 		{"zero length", append(append([]byte{}, head...), 0x00), nil, 0},
-		{"trailing octets ignored", append(append([]byte{}, head...), 0x01, 0x11, 0x99, 0x99), nil, 1},
+		// A segment whose LOS accounts for less than the ASDU carries was not
+		// produced by a conforming sender: the frame fixes the length and LOS
+		// fixes the segment, so there is nowhere for the surplus to come from.
+		{"trailing octets rejected", append(append([]byte{}, head...), 0x01, 0x11, 0x99, 0x99), ErrTrailingOctets, 0},
 		{"truncated payload", append(append([]byte{}, head...), 0x04, 0x11, 0x22), io.EOF, 0},
 		{"truncated header", head[:len(head)-1], io.EOF, 0},
 	}
@@ -193,7 +197,7 @@ func TestFileSegmentVariableLength(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			a := NewEmptyASDU(ParamsWide)
 			err := a.UnmarshalBinary(tt.raw)
-			if err != tt.wantErr {
+			if !errors.Is(err, tt.wantErr) {
 				t.Fatalf("UnmarshalBinary() error = %v, want %v", err, tt.wantErr)
 			}
 			if err != nil {
@@ -203,6 +207,28 @@ func TestFileSegmentVariableLength(t *testing.T) {
 				t.Fatalf("segment length = %d, want %d", len(got.Segment), tt.wantLen)
 			}
 		})
+	}
+}
+
+// A device that pads can be accommodated deliberately, which is different
+// from doing it silently for everyone.
+func TestFileSegmentTrailingOctetsAllowed(t *testing.T) {
+	head := []byte{
+		byte(F_SG_NA_1), 0x01, byte(FileTransfer), 0x00, 0x34, 0x12,
+		0x01, 0x00, 0x00, // IOA
+		0x02, 0x00, // NOF
+		0x01, // NOS
+	}
+	raw := append(append([]byte{}, head...), 0x01, 0x11, 0x99, 0x99)
+
+	lenient := *ParamsWide
+	lenient.AllowTrailingOctets = true
+	a := NewEmptyASDU(&lenient)
+	if err := a.UnmarshalBinary(raw); err != nil {
+		t.Fatalf("UnmarshalBinary() error = %v, want nil with AllowTrailingOctets", err)
+	}
+	if got := a.GetFileSegment(); len(got.Segment) != 1 || got.Segment[0] != 0x11 {
+		t.Fatalf("segment = % x, want 11", got.Segment)
 	}
 }
 
