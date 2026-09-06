@@ -56,6 +56,11 @@ type secondaryState struct {
 	phase      secondaryPhase
 	fcb        bool // FCB of the next FCV frame sent to this station
 	wantClass1 bool // ACD seen: a class 1 data request is due
+	// dfc is the Data Flow Control bit this station last reported. While it
+	// is set the station's receive buffer is full and no further user data
+	// may be sent to it — link services still may, and are how the primary
+	// learns the buffer has drained.
+	dfc bool
 }
 
 // outgoingASDU is a queued application message with its target station.
@@ -604,7 +609,17 @@ func (sf *Client) handleIncomingFrame(frame *cs101.Frame) error {
 		sf.Warn("Received unexpected frame with PRM=1 (103 is unbalanced): %s", ctrl)
 		return nil
 	}
-	if ctrl.DFC {
+	// Every secondary response carries DFC. Remember it against the station:
+	// while it is set, user data must be held back or the secondary drops
+	// what it cannot buffer. See IEC 60870-5-2, subclass 5.1.3.
+	if sec := sf.secs[receivedAddr]; sec != nil {
+		if ctrl.DFC && !sec.dfc {
+			sf.Warn("Station %d reports DFC=1 (buffer full): holding back user data.", receivedAddr)
+		} else if !ctrl.DFC && sec.dfc {
+			sf.Debug("Station %d cleared DFC: user data may flow again.", receivedAddr)
+		}
+		sec.dfc = ctrl.DFC
+	} else if ctrl.DFC {
 		sf.Warn("Station %d indicates Data Flow Control active (buffer likely full).", receivedAddr)
 	}
 
@@ -1057,12 +1072,15 @@ func (sf *Client) trySendNextFromQueue() bool {
 			sf.sendQueue = append(sf.sendQueue[:i], sf.sendQueue[i+1:]...)
 			continue
 		}
-		if sec.phase == phaseActive {
+		if sec.phase == phaseActive && !sec.dfc {
 			next = e
 			sf.sendQueue = append(sf.sendQueue[:i], sf.sendQueue[i+1:]...)
 			found = true
 			break
 		}
+		// Not active yet, or holding back because the station reported
+		// DFC=1: keep it queued and try the entries behind it, which may be
+		// for a station that can still take data.
 		i++
 	}
 	sf.sendQueueMutex.Unlock()

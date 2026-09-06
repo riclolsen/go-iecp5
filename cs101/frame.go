@@ -42,6 +42,23 @@ const (
 	MaxFrameLen = MaxLengthField + 6
 )
 
+// IsBroadcastAddr reports whether a link address is the broadcast address:
+// all ones for the configured width.
+//
+// A broadcast frame is addressed to every station on the line at once, so no
+// station may answer it — every one of them would transmit together and the
+// replies would collide. IEC 60870-5-101 therefore admits only SEND/NO REPLY
+// at this address.
+func IsBroadcastAddr(addr uint16, linkAddrSize byte) bool {
+	switch linkAddrSize {
+	case 1:
+		return addr == 0xFF
+	case 2:
+		return addr == 0xFFFF
+	}
+	return false
+}
+
 // MaxASDULen is the largest ASDU that fits in one variable-length frame for
 // a given link address size.
 func MaxASDULen(linkAddrSize byte) int {

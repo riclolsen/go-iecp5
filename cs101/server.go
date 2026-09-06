@@ -385,6 +385,25 @@ func (sf *Server) handleIncomingFrame(frame *Frame) error {
 			// Silently ignore frames not addressed to this station
 			return nil
 		}
+
+		if isBroadcast {
+			// A broadcast frame reaches every station on the line, so
+			// answering it would put all of them on the wire together and
+			// the replies would collide. The standard admits only
+			// SEND/NO REPLY here: take the data and stay silent.
+			ctrl := frame.GetControlField()
+			switch {
+			case !ctrl.PRM:
+				// not a primary frame; nothing to do
+			case ctrl.Fun == PrimFcUserDataNoConf:
+				sf.Debug("Received broadcast user data (no reply)")
+				sf.dispatchASDU(frame)
+			default:
+				sf.Warn("Ignoring a broadcast frame requesting a reply (FC=%d): answering it would collide with every other station on the line.",
+					ctrl.Fun)
+			}
+			return nil
+		}
 	}
 
 	ctrl := frame.GetControlField()
