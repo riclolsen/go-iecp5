@@ -8,6 +8,9 @@ on:
     paths-ignore:
       - '**.md'
 
+permissions:
+  contents: read
+
 env:
   GOPROXY: "https://proxy.golang.org"
 
