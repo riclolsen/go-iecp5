@@ -6,6 +6,7 @@ package cs104
 
 import (
 	"errors"
+	"fmt"
 	"time"
 )
 
@@ -117,6 +118,27 @@ func (sf *Config) Valid() error {
 		sf.IdleTimeout3 = 20 * time.Second
 	} else if sf.IdleTimeout3 < IdleTimeout3Min || sf.IdleTimeout3 > IdleTimeout3Max {
 		return errors.New(`IdleTimeout3 "t₃" not in [1 second, 48 hours]`)
+	}
+
+	// The two parameters above are not independent of the two before them,
+	// and a combination that is individually in range can still be unusable.
+
+	// t₂ is how long a receiver may wait before acknowledging with an
+	// S-frame; t₁ is how long a sender waits for that acknowledgement before
+	// declaring the connection dead. If t₂ were not shorter, the sender would
+	// time out while the receiver was still within its rights to stay quiet,
+	// and the connection would drop on a healthy link.
+	if sf.RecvUnAckTimeout2 >= sf.SendUnAckTimeout1 {
+		return errors.New(`RecvUnAckTimeout2 "t₂" must be less than SendUnAckTimeout1 "t₁"`)
+	}
+
+	// A receiver acknowledges at the latest after w I-frames; a sender stops
+	// after k unacknowledged ones. With w above two thirds of k the sender
+	// reaches its limit before the receiver is obliged to acknowledge, and
+	// throughput collapses to one window per t₂ instead of flowing.
+	if int(sf.RecvUnAckLimitW) > int(sf.SendUnAckLimitK)*2/3 {
+		return fmt.Errorf(`RecvUnAckLimitW "w" (%d) must not exceed two thirds of SendUnAckLimitK "k" (%d)`,
+			sf.RecvUnAckLimitW, sf.SendUnAckLimitK)
 	}
 
 	return nil

@@ -180,6 +180,9 @@ func (sf *SrvSession) run(ctx context.Context) {
 
 	// default: STOPDT, when connected establish and not enable "data transfer" yet
 	var isActive = false
+	// pendingStopDt records a STOPDT activation whose confirmation is waiting
+	// for the I-frames already sent to be acknowledged.
+	var pendingStopDt = false
 	var checkTicker = time.NewTicker(timeoutResolution)
 
 	// transmission timestamps for timeout calculation
@@ -199,6 +202,18 @@ func (sf *SrvSession) run(ctx context.Context) {
 	sendUFrame := func(which byte) {
 		sf.Debug("TX uFrame %v", uAPCI{which})
 		sf.sendRaw <- newUFrame(which)
+	}
+
+	// confirmStopDtIfDone answers a STOPDT activation once the I-frames that
+	// were already on the wire have been acknowledged. Until then the
+	// controlling station is still owed data, and saying transfer has stopped
+	// would be untrue.
+	confirmStopDtIfDone := func() {
+		if pendingStopDt && sf.ackNoSend == sf.seqNoSend {
+			sf.Debug("outstanding data acknowledged, confirming STOPDT")
+			sendUFrame(uStopDtConfirm)
+			pendingStopDt = false
+		}
 	}
 
 	sendIFrame := func(asdu1 []byte) {
@@ -275,6 +290,8 @@ func (sf *SrvSession) run(ctx context.Context) {
 				sf.ackNoRcv = sf.seqNoRcv
 			}
 
+			confirmStopDtIfDone()
+
 			// When the idle time is up, send a TestFrActive frame to keep alive
 			if now.Sub(idleTimeout3Sine) >= sf.config.IdleTimeout3 {
 				sendUFrame(uTestFrActive)
@@ -300,10 +317,16 @@ func (sf *SrvSession) run(ctx context.Context) {
 					sf.Error("fatal incoming acknowledge either earlier than previous or later than sendTime")
 					return
 				}
+				confirmStopDtIfDone()
 
 			case iAPCI:
 				sf.Debug("RX iFrame %v", head)
 				if !isActive {
+					// Its acknowledgement still counts, which is what lets a
+					// pending STOPDT complete.
+					if sf.updateAckNoOut(head.rcvSN) {
+						confirmStopDtIfDone()
+					}
 					sf.Warn("station not active")
 					break // not active, discard apdu
 				}
@@ -337,8 +360,23 @@ func (sf *SrvSession) run(ctx context.Context) {
 				// 	isActive = true
 				// 	startDtActiveSendSince = willNotTimeout
 				case uStopDtActive:
-					sendUFrame(uStopDtConfirm)
+					// Stop handing out new I-frames at once, but do not
+					// confirm yet: the confirmation says data transfer has
+					// finished, and I-frames already sent may still be
+					// unacknowledged. Confirming early tells the controlling
+					// station the link is idle while data it never
+					// acknowledged is still in flight — which is exactly the
+					// moment it would switch to a redundant connection or
+					// close this one.
 					isActive = false
+					pendingStopDt = true
+					if sf.ackNoSend == sf.seqNoSend {
+						sendUFrame(uStopDtConfirm)
+						pendingStopDt = false
+					} else {
+						sf.Debug("STOPDT requested with %d unacknowledged I-frame(s): confirming once they are acknowledged",
+							seqNoCount(sf.ackNoSend, sf.seqNoSend))
+					}
 				// case uStopDtConfirm:
 				// 	isActive = false
 				// 	stopDtActiveSendSince = willNotTimeout
