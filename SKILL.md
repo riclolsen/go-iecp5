@@ -360,6 +360,10 @@ throughput note in `docs/cs104.md`.
     master) via the `filetransfer` package; the control direction,
     `F_SC_NB_1` <127>, IEC 62351-5 (S_*) types and the 103 disturbance data
     service are not implemented.
+13. **cs104 outstation STOPDT con waits for acks** (IEC 104 §5.3): new
+    I-frames stop at once, but STOPDT con is sent only after every sent
+    I-frame is acknowledged. A master that stops acking after STOPDT act
+    gets no con and the link closes at t1. The cs104 client acks on its own.
 
 ## Verification without hardware
 
@@ -369,6 +373,9 @@ throughput note in `docs/cs104.md`.
   stack in tests.
 - Third-party interop: `lib60870` (C), OpenMUC j60870, QTester104, mosaik,
   or any IEC 104 test set with defaults k=12, w=8, t1=15s, t2=10s, t3=20s.
+  Config rules: t2 < t1 is enforced (an invalid `Server.SetConfig` silently
+  falls back to defaults — enable logging; `ClientOption.SetConfig` returns
+  the error). w ≤ ⅔·k (peer's k) is only warned about.
 
 
 ## Sending in bulk: the one mistake that loses data

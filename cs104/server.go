@@ -36,6 +36,8 @@ type Server struct {
 	clog.Clog
 	wg           sync.WaitGroup
 	serverNumber int
+	// configErr is why the last SetConfig fell back to DefaultConfig.
+	configErr error
 }
 
 // NewServer new a server, default config and default asdu.ParamsWide params
@@ -49,12 +51,16 @@ func NewServer(handler ServerHandlerInterface) *Server {
 	}
 }
 
-// SetConfig set config if config is valid it will use DefaultConfig()
+// SetConfig sets the config. An invalid config is not used: DefaultConfig()
+// is, and the reason is logged here and again when ListenAndServer starts.
 func (sf *Server) SetConfig(cfg Config) *Server {
 	if err := cfg.Valid(); err != nil {
 		sf.config = DefaultConfig()
+		sf.configErr = err
+		sf.Error("invalid config, using the defaults instead: %v", err)
 	} else {
 		sf.config = cfg
+		sf.configErr = nil
 	}
 	return sf
 }
@@ -102,6 +108,12 @@ func (sf *Server) ListenAndServer(addr string) error {
 		sf.Debug("server stop")
 	}()
 	sf.Debug("server run")
+	if sf.configErr != nil {
+		sf.Error("running with the default config, the one set was invalid: %v", sf.configErr)
+	}
+	if advice := sf.config.flowControlAdvice(); advice != "" {
+		sf.Warn("%s", advice)
+	}
 	for {
 		conn, err := listen.Accept()
 		if err != nil {

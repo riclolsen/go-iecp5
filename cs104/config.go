@@ -57,18 +57,19 @@ type Config struct {
 	//See IEC 60870-5-104, subclass 5.5.
 	SendUnAckLimitK uint16
 
-	//The maximum timeout period for frame reception confirmation, and the connection will be closed immediately after this timeout.
+	//The timeout for a STARTDT, STOPDT or TESTFR confirmation, and for the acknowledgement of a sent I-frame;
+	//the connection is closed when it expires. Must be greater than t₂.
 	//"t₁" range [1, 255]s default 15s.
 	//See IEC 60870-5-104, figure 18.
 	SendUnAckTimeout1 time.Duration
 
-	//The receiver issues an acknowledgment at the latest after receiving w times of I-frames application protocol data units. w does not exceed 2/3k (2/3 SendUnAckLimitK)
+	//The receiver issues an acknowledgment at the latest after receiving w times of I-frames application protocol data units. w should not exceed 2/3k (2/3 SendUnAckLimitK) of the peer; see flowControlAdvice
 	//"w" range [1, 32767] default 8.
 	//See IEC 60870-5-104, subclass 5.5.
 	RecvUnAckLimitW uint16
 
 	//The maximum time for sending a receipt confirmation, in fact, this frame sends a reply within 1 second
-	//"t₂" range [1, 255]s default 10s
+	//"t₂" range [1, 255]s default 10s. Must be less than t₁.
 	//See IEC 60870-5-104, figure 10.
 	RecvUnAckTimeout2 time.Duration
 
@@ -120,28 +121,36 @@ func (sf *Config) Valid() error {
 		return errors.New(`IdleTimeout3 "t₃" not in [1 second, 48 hours]`)
 	}
 
-	// The two parameters above are not independent of the two before them,
-	// and a combination that is individually in range can still be unusable.
-
 	// t₂ is how long a receiver may wait before acknowledging with an
-	// S-frame; t₁ is how long a sender waits for that acknowledgement before
-	// declaring the connection dead. If t₂ were not shorter, the sender would
-	// time out while the receiver was still within its rights to stay quiet,
-	// and the connection would drop on a healthy link.
+	// S-frame. This library also uses t₁ — in the standard chiefly the
+	// timeout for a STARTDT, STOPDT or TESTFR confirmation — as the time a
+	// sender waits for that acknowledgement before declaring the connection
+	// dead. If t₂ were not shorter, the sender would time out while the
+	// receiver was still within its rights to stay quiet, and the connection
+	// would drop on a healthy link. IEC 60870-5-104 requires t₂ < t₁.
 	if sf.RecvUnAckTimeout2 >= sf.SendUnAckTimeout1 {
 		return errors.New(`RecvUnAckTimeout2 "t₂" must be less than SendUnAckTimeout1 "t₁"`)
 	}
 
-	// A receiver acknowledges at the latest after w I-frames; a sender stops
-	// after k unacknowledged ones. With w above two thirds of k the sender
-	// reaches its limit before the receiver is obliged to acknowledge, and
-	// throughput collapses to one window per t₂ instead of flowing.
-	if int(sf.RecvUnAckLimitW) > int(sf.SendUnAckLimitK)*2/3 {
-		return fmt.Errorf(`RecvUnAckLimitW "w" (%d) must not exceed two thirds of SendUnAckLimitK "k" (%d)`,
-			sf.RecvUnAckLimitW, sf.SendUnAckLimitK)
-	}
-
 	return nil
+}
+
+// flowControlAdvice reports a combination the standard recommends against
+// but does not forbid, or "" when there is none.
+//
+// The recommendation is that w not exceed two thirds of k. It relates the
+// peer's k to this station's w: k limits what this station sends, w what it
+// receives. Checking it against one Config assumes the peer is configured
+// like this station, which is usual but not required — a station with k=1 and
+// a large w is healthy if its peer's k is large — so it is advice, logged
+// when the connection starts, and not a reason to refuse the Config.
+func (sf *Config) flowControlAdvice() string {
+	if 3*int(sf.RecvUnAckLimitW) > 2*int(sf.SendUnAckLimitK) {
+		return fmt.Sprintf(`RecvUnAckLimitW "w" (%d) exceeds two thirds of SendUnAckLimitK "k" (%d): `+
+			`a peer configured with the same k reaches its limit before this station must acknowledge, `+
+			`and throughput falls to one window per t₂`, sf.RecvUnAckLimitW, sf.SendUnAckLimitK)
+	}
+	return ""
 }
 
 // DefaultConfig default config

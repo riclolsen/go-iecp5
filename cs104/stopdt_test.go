@@ -3,6 +3,7 @@ package cs104
 import (
 	"bytes"
 	"encoding/hex"
+	"io"
 	"net"
 	"testing"
 	"time"
@@ -48,23 +49,18 @@ func readFrame(conn net.Conn, d time.Duration) []byte {
 	return append(head, body...)
 }
 
-var stopDtCon = []byte{startFrame, 4, uStopDtConfirm | 0x03, 0, 0, 0}
+var (
+	stopDtAct  = []byte{startFrame, 4, uStopDtActive | 0x03, 0, 0, 0}
+	stopDtCon  = []byte{startFrame, 4, uStopDtConfirm | 0x03, 0, 0, 0}
+	startDtAct = []byte{startFrame, 4, uStartDtActive | 0x03, 0, 0, 0}
+	startDtCon = []byte{startFrame, 4, uStartDtConfirm | 0x03, 0, 0, 0}
+)
 
 // dialStarted brings a session up to the point where data transfer is active.
-func dialStarted(t *testing.T, h ServerHandlerInterface) net.Conn {
+// cfg, when not nil, configures the server.
+func dialStarted(t *testing.T, h ServerHandlerInterface, cfg *Config) net.Conn {
 	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	addr := l.Addr().String()
-	_ = l.Close()
-
-	srv := NewServer(h)
-	srv.LogMode(false)
-	go func() { _ = srv.ListenAndServer(addr) }()
-	t.Cleanup(func() { _ = srv.Close() })
-	time.Sleep(200 * time.Millisecond)
+	addr := startServer(t, h, cfg)
 
 	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
 	if err != nil {
@@ -72,90 +68,167 @@ func dialStarted(t *testing.T, h ServerHandlerInterface) net.Conn {
 	}
 	t.Cleanup(func() { _ = conn.Close() })
 
-	if _, err := conn.Write([]byte{startFrame, 4, uStartDtActive | 0x03, 0, 0, 0}); err != nil {
-		t.Fatal(err)
-	}
-	if got := readFrame(conn, 2*time.Second); len(got) == 0 {
-		t.Fatal("no STARTDT con")
+	write(t, conn, startDtAct)
+	if got := readFrame(conn, 2*time.Second); !bytes.Equal(got, startDtCon) {
+		t.Fatalf("no STARTDT con: got %s", hex.EncodeToString(got))
 	}
 	return conn
 }
 
-func TestStopDtWaitsForOutstandingData(t *testing.T) {
-	conn := dialStarted(t, pushHandler{})
-
-	// Interrogate, then read the replies without acknowledging them.
-	asduBytes := []byte{byte(asdu.C_IC_NA_1), 0x01, 0x06, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x14}
-	iframe := append([]byte{startFrame, byte(4 + len(asduBytes)), 0x00, 0x00, 0x00, 0x00}, asduBytes...)
-	if _, err := conn.Write(iframe); err != nil {
+func write(t *testing.T, conn net.Conn, frame []byte) {
+	t.Helper()
+	if _, err := conn.Write(frame); err != nil {
 		t.Fatal(err)
 	}
+}
 
-	unacked := 0
-	var lastSendSN uint16
+// interrogation is an I-frame carrying a station interrogation.
+func interrogation(sendSN, rcvSN uint16) []byte {
+	asduBytes := []byte{byte(asdu.C_IC_NA_1), 0x01, 0x06, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x14}
+	iframe, _ := newIFrame(sendSN, rcvSN, asduBytes)
+	return iframe
+}
+
+// readUnacked reads frames until the outstation falls silent for quiet, and
+// returns how many I-frames it sent and the receive sequence number that
+// acknowledges all of them.
+func readUnacked(t *testing.T, conn net.Conn, quiet time.Duration) (n int, ackTo uint16) {
+	t.Helper()
 	for {
-		f := readFrame(conn, 1500*time.Millisecond)
+		f := readFrame(conn, quiet)
 		if len(f) == 0 {
 			break
 		}
-		if f[2]&0x01 == 0 { // I-frame: remember its send sequence number
-			lastSendSN = uint16(f[2])>>1 + uint16(f[3])<<7
-			unacked++
+		if f[2]&0x01 == 0 { // I-frame
+			ackTo = (uint16(f[2])>>1 + uint16(f[3])<<7 + 1) & 32767
+			n++
 		}
 	}
-	if unacked == 0 {
+	if n == 0 {
 		t.Fatal("the outstation sent no I-frames; the test proves nothing")
 	}
+	return n, ackTo
+}
 
-	// Ask it to stop. Nothing may be confirmed yet.
-	if _, err := conn.Write([]byte{startFrame, 4, uStopDtActive | 0x03, 0, 0, 0}); err != nil {
-		t.Fatal(err)
+// pendingStopDt leaves the session with I-frames unacknowledged and a STOPDT
+// act waiting on them, and returns the acknowledgement that would release it.
+func pendingStopDt(t *testing.T, conn net.Conn, quiet time.Duration) uint16 {
+	t.Helper()
+	write(t, conn, interrogation(0, 0))
+	unacked, ackTo := readUnacked(t, conn, quiet)
+
+	write(t, conn, stopDtAct)
+	if got := readFrame(conn, quiet); got != nil {
+		t.Fatalf("with %d I-frames unacknowledged, STOPDT act must be answered by nothing yet: got %s",
+			unacked, hex.EncodeToString(got))
 	}
-	if got := readFrame(conn, 1500*time.Millisecond); bytes.Equal(got, stopDtCon) {
-		t.Fatalf("STOPDT confirmed with %d I-frames unacknowledged", unacked)
-	}
+	return ackTo
+}
+
+func TestStopDtWaitsForOutstandingData(t *testing.T) {
+	conn := dialStarted(t, pushHandler{}, nil)
+	ackTo := pendingStopDt(t, conn, time.Second)
 
 	// Acknowledge everything; the confirmation must follow promptly.
-	ackTo := lastSendSN + 1
-	if _, err := conn.Write(newSFrame(ackTo)); err != nil {
-		t.Fatal(err)
-	}
-	got := readFrame(conn, 3*time.Second)
-	if !bytes.Equal(got, stopDtCon) {
+	write(t, conn, newSFrame(ackTo))
+	if got := readFrame(conn, 3*time.Second); !bytes.Equal(got, stopDtCon) {
 		t.Fatalf("after acknowledging, STOPDT was not confirmed: got %s", hex.EncodeToString(got))
+	}
+}
+
+// The acknowledgement carried by an I-frame counts as well as an S-frame's,
+// even though the I-frame itself is discarded while data transfer is stopped.
+func TestStopDtCompletedByIFrameAck(t *testing.T) {
+	conn := dialStarted(t, pushHandler{}, nil)
+	ackTo := pendingStopDt(t, conn, time.Second)
+
+	write(t, conn, interrogation(1, ackTo))
+	if got := readFrame(conn, 3*time.Second); !bytes.Equal(got, stopDtCon) {
+		t.Fatalf("an I-frame's acknowledgement did not complete STOPDT: got %s", hex.EncodeToString(got))
+	}
+	// And the interrogation it carried must not start data flowing again.
+	if got := readFrame(conn, time.Second); got != nil {
+		t.Fatalf("frame sent after STOPDT con: %s", hex.EncodeToString(got))
+	}
+}
+
+// A STARTDT that arrives while a STOPDT is still waiting supersedes it. The
+// late acknowledgement must not then produce a STOPDT con, which would
+// deactivate a session the controlling station has just started.
+func TestStartDtCancelsPendingStopDt(t *testing.T) {
+	conn := dialStarted(t, pushHandler{}, nil)
+	ackTo := pendingStopDt(t, conn, time.Second)
+
+	write(t, conn, startDtAct)
+	if got := readFrame(conn, 2*time.Second); !bytes.Equal(got, startDtCon) {
+		t.Fatalf("no STARTDT con: got %s", hex.EncodeToString(got))
+	}
+	write(t, conn, newSFrame(ackTo))
+	if got := readFrame(conn, 1500*time.Millisecond); got != nil {
+		t.Fatalf("frame sent after the acknowledgement of a started session: %s", hex.EncodeToString(got))
+	}
+}
+
+// A repeated STOPDT act while one is pending gets one confirmation, not two.
+func TestStopDtRepeatedWhilePending(t *testing.T) {
+	conn := dialStarted(t, pushHandler{}, nil)
+	ackTo := pendingStopDt(t, conn, time.Second)
+
+	write(t, conn, stopDtAct)
+	if got := readFrame(conn, time.Second); got != nil {
+		t.Fatalf("repeated STOPDT act answered while data is outstanding: %s", hex.EncodeToString(got))
+	}
+	write(t, conn, newSFrame(ackTo))
+	if got := readFrame(conn, 3*time.Second); !bytes.Equal(got, stopDtCon) {
+		t.Fatalf("after acknowledging, STOPDT was not confirmed: got %s", hex.EncodeToString(got))
+	}
+	if got := readFrame(conn, time.Second); got != nil {
+		t.Fatalf("second frame after STOPDT con: %s", hex.EncodeToString(got))
+	}
+}
+
+// A controlling station that never acknowledges does not leave the session
+// hanging: t₁ runs out and the connection closes.
+func TestStopDtWithoutAcknowledgementTimesOut(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.SendUnAckTimeout1 = 2 * time.Second
+	cfg.RecvUnAckTimeout2 = 1 * time.Second
+	conn := dialStarted(t, pushHandler{}, &cfg)
+	sent := time.Now()
+	_ = pendingStopDt(t, conn, 300*time.Millisecond)
+
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	buf := make([]byte, 64)
+	n, err := conn.Read(buf)
+	if err != io.EOF {
+		t.Fatalf("expected the outstation to close the connection, got %d bytes (% x), err %v", n, buf[:n], err)
+	}
+	if elapsed := time.Since(sent); elapsed < cfg.SendUnAckTimeout1 {
+		t.Fatalf("connection closed after %v, before t₁ = %v", elapsed, cfg.SendUnAckTimeout1)
 	}
 }
 
 // With nothing outstanding there is nothing to wait for.
 func TestStopDtConfirmsImmediatelyWhenIdle(t *testing.T) {
-	conn := dialStarted(t, nullHandler{})
+	conn := dialStarted(t, nullHandler{}, nil)
 
-	if _, err := conn.Write([]byte{startFrame, 4, uStopDtActive | 0x03, 0, 0, 0}); err != nil {
-		t.Fatal(err)
-	}
-	got := readFrame(conn, 2*time.Second)
-	if !bytes.Equal(got, stopDtCon) {
+	write(t, conn, stopDtAct)
+	if got := readFrame(conn, 2*time.Second); !bytes.Equal(got, stopDtCon) {
 		t.Fatalf("STOPDT was not confirmed on an idle session: got %s", hex.EncodeToString(got))
 	}
 }
 
 // Data transfer must stop at once, even though the confirmation waits.
 func TestStopDtStopsNewDataImmediately(t *testing.T) {
-	conn := dialStarted(t, pushHandler{})
+	conn := dialStarted(t, pushHandler{}, nil)
 
-	if _, err := conn.Write([]byte{startFrame, 4, uStopDtActive | 0x03, 0, 0, 0}); err != nil {
-		t.Fatal(err)
-	}
+	write(t, conn, stopDtAct)
 	if got := readFrame(conn, 2*time.Second); !bytes.Equal(got, stopDtCon) {
 		t.Fatalf("idle STOPDT not confirmed: %s", hex.EncodeToString(got))
 	}
 
 	// An interrogation after STOPDT must produce no I-frames.
-	asduBytes := []byte{byte(asdu.C_IC_NA_1), 0x01, 0x06, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x14}
-	iframe := append([]byte{startFrame, byte(4 + len(asduBytes)), 0x00, 0x00, 0x00, 0x00}, asduBytes...)
-	if _, err := conn.Write(iframe); err != nil {
-		t.Fatal(err)
-	}
+	write(t, conn, interrogation(0, 0))
 	for {
 		f := readFrame(conn, 1200*time.Millisecond)
 		if len(f) == 0 {

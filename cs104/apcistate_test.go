@@ -40,6 +40,13 @@ func (nullHandler) ASDUHandlerAll(asdu.Connect, *asdu.ASDU, int) error          
 
 func startTestServer(t *testing.T) string {
 	t.Helper()
+	return startServer(t, nullHandler{}, nil)
+}
+
+// startServer starts a server on a free loopback port, with cfg when it is not
+// nil, and returns its address once it is accepting connections.
+func startServer(t *testing.T, h ServerHandlerInterface, cfg *Config) string {
+	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -47,12 +54,29 @@ func startTestServer(t *testing.T) string {
 	addr := l.Addr().String()
 	_ = l.Close()
 
-	srv := NewServer(nullHandler{})
+	srv := NewServer(h)
 	srv.LogMode(false)
+	if cfg != nil {
+		srv.SetConfig(*cfg)
+		if srv.configErr != nil {
+			t.Fatalf("test config rejected: %v", srv.configErr)
+		}
+	}
 	go func() { _ = srv.ListenAndServer(addr) }()
 	t.Cleanup(func() { _ = srv.Close() })
-	time.Sleep(200 * time.Millisecond)
-	return addr
+
+	for deadline := time.Now().Add(5 * time.Second); ; {
+		srv.mux.Lock()
+		ready := srv.listen != nil
+		srv.mux.Unlock()
+		if ready {
+			return addr
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("server did not start listening")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 // sendAndRead writes one frame on a fresh connection and returns whatever
@@ -135,15 +159,7 @@ func TestMalformedFrameOnAnOpenSession(t *testing.T) {
 	}
 	defer conn.Close()
 
-	read := func() []byte {
-		_ = conn.SetReadDeadline(time.Now().Add(1500 * time.Millisecond))
-		buf := make([]byte, 64)
-		n, err := conn.Read(buf)
-		if err != nil {
-			return nil
-		}
-		return buf[:n]
-	}
+	read := func() []byte { return readFrame(conn, 1500*time.Millisecond) }
 
 	if _, err := conn.Write([]byte{startFrame, 4, uStartDtActive | 0x03, 0, 0, 0}); err != nil {
 		t.Fatal(err)
