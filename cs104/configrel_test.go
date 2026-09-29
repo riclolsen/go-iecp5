@@ -31,22 +31,15 @@ func TestConfigRelationships(t *testing.T) {
 			c.RecvUnAckTimeout2 = 9 * time.Second
 		}, false},
 
-		// w must not exceed two thirds of k.
+		// w above two thirds of k is advice, not an error: the
+		// recommendation relates the peer's k to this station's w.
 		{"w equal to k", func(c *Config) {
 			c.RecvUnAckLimitW = c.SendUnAckLimitK
-		}, true},
-		{"w just over two thirds of k", func(c *Config) {
-			c.SendUnAckLimitK = 12
-			c.RecvUnAckLimitW = 9
-		}, true},
-		{"w exactly two thirds of k", func(c *Config) {
-			c.SendUnAckLimitK = 12
-			c.RecvUnAckLimitW = 8
 		}, false},
 		{"k of 1 with w of 1", func(c *Config) {
 			c.SendUnAckLimitK = 1
 			c.RecvUnAckLimitW = 1
-		}, true},
+		}, false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := base()
@@ -70,7 +63,27 @@ func TestZeroConfigIsValid(t *testing.T) {
 	if cfg.RecvUnAckTimeout2 >= cfg.SendUnAckTimeout1 {
 		t.Errorf("defaults give t2=%v t1=%v", cfg.RecvUnAckTimeout2, cfg.SendUnAckTimeout1)
 	}
-	if int(cfg.RecvUnAckLimitW) > int(cfg.SendUnAckLimitK)*2/3 {
-		t.Errorf("defaults give w=%d k=%d", cfg.RecvUnAckLimitW, cfg.SendUnAckLimitK)
+	if advice := cfg.flowControlAdvice(); advice != "" {
+		t.Errorf("defaults draw advice: %s", advice)
+	}
+}
+
+// w ≤ ⅔·k is checked exactly, without integer truncation.
+func TestFlowControlAdvice(t *testing.T) {
+	for _, tt := range []struct {
+		k, w   uint16
+		advice bool
+	}{
+		{12, 8, false},
+		{12, 9, true},
+		{3, 2, false},
+		{2, 1, false},
+		{2, 2, true},
+		{1, 1, true},
+	} {
+		cfg := Config{SendUnAckLimitK: tt.k, RecvUnAckLimitW: tt.w}
+		if got := cfg.flowControlAdvice() != ""; got != tt.advice {
+			t.Errorf("k=%d w=%d: advice %v, want %v", tt.k, tt.w, got, tt.advice)
+		}
 	}
 }

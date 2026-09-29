@@ -133,6 +133,9 @@ func (sf *Client) Start() error {
 	if sf.option.server == nil {
 		return errors.New("empty remote server")
 	}
+	if advice := sf.option.config.flowControlAdvice(); advice != "" {
+		sf.Warn("%s", advice)
+	}
 
 	go sf.running()
 	return nil

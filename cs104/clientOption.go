@@ -35,7 +35,8 @@ func NewOption() *ClientOption {
 	}
 }
 
-// SetConfig set config if config is valid it will use DefaultConfig()
+// SetConfig sets the config. An invalid config is not used: DefaultConfig()
+// is, and the returned error says why — do not discard it.
 func (sf *ClientOption) SetConfig(cfg Config) (err error) {
 	if err = cfg.Valid(); err != nil {
 		sf.config = DefaultConfig()

@@ -290,8 +290,6 @@ func (sf *SrvSession) run(ctx context.Context) {
 				sf.ackNoRcv = sf.seqNoRcv
 			}
 
-			confirmStopDtIfDone()
-
 			// When the idle time is up, send a TestFrActive frame to keep alive
 			if now.Sub(idleTimeout3Sine) >= sf.config.IdleTimeout3 {
 				sendUFrame(uTestFrActive)
@@ -356,6 +354,11 @@ func (sf *SrvSession) run(ctx context.Context) {
 				case uStartDtActive:
 					sendUFrame(uStartDtConfirm)
 					isActive = true
+					// A new STARTDT supersedes a STOPDT still waiting for its
+					// acknowledgements. Left set, the next acknowledgement
+					// would emit a STOPDT con on a session the controlling
+					// station has just started, and it would deactivate.
+					pendingStopDt = false
 				// case uStartDtConfirm:
 				// 	isActive = true
 				// 	startDtActiveSendSince = willNotTimeout
@@ -368,7 +371,15 @@ func (sf *SrvSession) run(ctx context.Context) {
 					// acknowledged is still in flight — which is exactly the
 					// moment it would switch to a redundant connection or
 					// close this one.
+					// This is the procedure of IEC 60870-5-104 subclause 5.3
+					// and what the IEC 60870-5-604 conformance tests expect.
 					isActive = false
+					// Acknowledge what was received before stopping, so the
+					// controlling station is not left waiting on us either.
+					if sf.ackNoRcv != sf.seqNoRcv {
+						sendSFrame(sf.seqNoRcv)
+						sf.ackNoRcv = sf.seqNoRcv
+					}
 					pendingStopDt = true
 					if sf.ackNoSend == sf.seqNoSend {
 						sendUFrame(uStopDtConfirm)
