@@ -170,6 +170,14 @@ Runnable programs live under [`_examples`](_examples) (each buildable with
   reverse-connection server.
 - `cs101_client_general` — minimal 101 serial master.
 
+## Interoperability tests
+
+`interop/` runs go-iecp5 as client and as station against lib60870, OpenMUC
+j60870, wendy512/iec104 and cB-Sigma/iec60870, using the Docker images of
+[otfabric/iec104-interop](https://github.com/otfabric/iec104-interop). Opt-in:
+`IEC104_INTEROP=1 go test ./interop/` (needs Docker). See
+[interop/README.md](interop/README.md), including the gaps it found.
+
 ## Implemented
 
 - All process information types in monitor direction, with and without

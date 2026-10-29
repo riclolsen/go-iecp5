@@ -1,0 +1,56 @@
+# Copied verbatim from github.com/otfabric/iec104-interop tests/cases.tsv (v0.3.1, MIT).
+# Refresh it when bumping the image tag; the format is described below.
+# Self-test cases for scripts/interop.sh, against the baseline fixture.
+#
+# Columns, separated by tabs:
+#   1  state   "ro" (the case does not change the station; servers are shared)
+#              "rw" (the case gets a freshly started server)
+#   2  exit    expected exit code of the client
+#   3  summary expected outcome: ok, error code, confirmations (cause, "n" when
+#              negative), termination, and type/cause of every received ASDU
+#   4  needs   "-", or features the pairing must declare in print-capabilities,
+#              separated by commas: "server:<feature>" and "client:<feature>".
+#              A pairing that lacks one skips the case.
+#   5  operation and its flags, as passed to "client"
+#
+# Every case runs for every client/server pairing. Besides matching the
+# expectation, all pairings must produce the same result document.
+ro	0	ok=true error=- conf= term=false asdus=	-	connect
+ro	0	ok=true error=- conf=7 term=true asdus=C_IC_NA_1/7,M_SP_NA_1/20,M_DP_NA_1/20,M_ST_NA_1/20,M_BO_NA_1/20,M_SP_NA_1/20,M_ME_NA_1/20,M_ME_NB_1/20,M_ME_NC_1/20,M_ME_NB_1/20,C_IC_NA_1/10	-	interrogate
+ro	0	ok=true error=- conf=7 term=true asdus=C_IC_NA_1/7,M_SP_NA_1/20,M_DP_NA_1/20,M_ST_NA_1/20,M_BO_NA_1/20,M_SP_NA_1/20,M_ME_NA_1/20,M_ME_NB_1/20,M_ME_NC_1/20,M_ME_NB_1/20,C_IC_NA_1/10	-	interrogate --common-address 65535
+ro	1	ok=false error=negative-confirmation conf=46n term=false asdus=C_IC_NA_1/46	-	interrogate --common-address 7
+ro	0	ok=true error=- conf=7 term=true asdus=C_IC_NA_1/7,M_SP_NA_1/20,M_DP_NA_1/20,M_ST_NA_1/20,M_BO_NA_1/20,M_SP_NA_1/20,M_ME_NA_1/20,M_ME_NB_1/20,M_ME_NC_1/20,M_ME_NB_1/20,C_IC_NA_1/10	-	interrogate --originator-address 7
+ro	1	ok=false error=negative-confirmation conf=7n term=false asdus=C_IC_NA_1/7	-	interrogate --qoi 21
+ro	0	ok=true error=- conf=7 term=true asdus=C_CI_NA_1/7,M_IT_NA_1/37,C_CI_NA_1/10	-	counter-interrogate
+ro	1	ok=false error=negative-confirmation conf=7n term=false asdus=C_CI_NA_1/7	-	counter-interrogate --qcc 69
+ro	0	ok=true error=- conf= term=false asdus=M_SP_NA_1/5	-	read --ioa 100
+ro	0	ok=true error=- conf= term=false asdus=M_ME_NC_1/5	-	read --ioa 202
+ro	0	ok=true error=- conf= term=false asdus=M_IT_NA_1/5	-	read --ioa 300
+ro	1	ok=false error=negative-confirmation conf=47n term=false asdus=C_RD_NA_1/47	-	read --ioa 999
+ro	0	ok=true error=- conf=7 term=false asdus=C_CS_NA_1/7	-	clock-sync --time 2026-10-09T15:35:12.345Z
+ro	0	ok=true error=- conf=7 term=false asdus=C_TS_TA_1/7	-	test-command
+ro	0	ok=true error=- conf= term=false asdus=	-	monitor --duration-ms 300
+ro	1	ok=false error=negative-confirmation conf=47n term=false asdus=C_SC_NA_1/47	-	command --type C_SC_NA_1 --ioa 999 --value true
+ro	1	ok=false error=negative-confirmation conf=47n term=false asdus=C_DC_NA_1/47	-	command --type C_DC_NA_1 --ioa 500 --value 1
+ro	1	ok=false error=negative-confirmation conf=7n term=false asdus=C_DC_NA_1/7	-	command --type C_DC_NA_1 --ioa 501 --value 3
+ro	1	ok=false error=negative-confirmation conf=7n term=false asdus=C_DC_NA_1/7	-	command --type C_DC_NA_1 --ioa 501 --value 0 --mode select
+ro	1	ok=false error=negative-confirmation conf=7n term=false asdus=C_SC_NA_1/7	-	command --type C_SC_NA_1 --ioa 510 --value true
+rw	0	ok=true error=- conf=7 term=true asdus=C_SC_NA_1/7,M_SP_TB_1/11,C_SC_NA_1/10	-	command --type C_SC_NA_1 --ioa 500 --value false
+rw	0	ok=true error=- conf=7 term=true asdus=C_SC_TA_1/7,M_SP_TB_1/11,C_SC_TA_1/10	server:timeTaggedCommands,client:timeTaggedCommands	command --type C_SC_NA_1 --ioa 500 --value false --with-time --qualifier 2
+rw	0	ok=true error=- conf=7 term=true asdus=C_SC_NA_1/7,M_SP_TB_1/11,C_SC_NA_1/10	-	command --type C_SC_NA_1 --ioa 500 --value false --qualifier 2
+rw	0	ok=true error=- conf=7,7 term=true asdus=C_DC_NA_1/7,C_DC_NA_1/7,M_DP_TB_1/3,C_DC_NA_1/10	-	command --type C_DC_NA_1 --ioa 501 --value 1 --mode sbo
+rw	0	ok=true error=- conf=7 term=true asdus=C_RC_NA_1/7,M_ST_TB_1/11,C_RC_NA_1/10	-	command --type C_RC_NA_1 --ioa 505 --value 2
+rw	0	ok=true error=- conf=7 term=true asdus=C_RC_TA_1/7,M_ST_TB_1/11,C_RC_TA_1/10	server:timeTaggedCommands,client:timeTaggedCommands	command --type C_RC_NA_1 --ioa 505 --value 1 --with-time
+rw	0	ok=true error=- conf=7 term=true asdus=C_RC_NA_1/7,M_ST_TB_1/11,C_RC_NA_1/10	-	command --type C_RC_NA_1 --ioa 505 --value 1
+rw	0	ok=true error=- conf=7 term=true asdus=C_SE_NA_1/7,M_ME_TD_1/11,C_SE_NA_1/10	-	command --type C_SE_NA_1 --ioa 503 --value -12345
+rw	0	ok=true error=- conf=7 term=true asdus=C_SE_TB_1/7,M_ME_TE_1/11,C_SE_TB_1/10	server:timeTaggedCommands,client:timeTaggedCommands	command --type C_SE_NB_1 --ioa 504 --value -7 --with-time
+rw	0	ok=true error=- conf=7 term=true asdus=C_SE_NB_1/7,M_ME_TE_1/11,C_SE_NB_1/10	-	command --type C_SE_NB_1 --ioa 504 --value -7
+rw	0	ok=true error=- conf=7,7 term=true asdus=C_SE_TC_1/7,C_SE_TC_1/7,M_ME_TF_1/11,C_SE_TC_1/10	server:timeTaggedCommands,client:timeTaggedCommands	command --type C_SE_NC_1 --ioa 502 --value 49.5 --mode sbo --with-time
+rw	0	ok=true error=- conf=7,7 term=true asdus=C_SE_NC_1/7,C_SE_NC_1/7,M_ME_TF_1/11,C_SE_NC_1/10	-	command --type C_SE_NC_1 --ioa 502 --value 49.5 --mode sbo
+rw	0	ok=true error=- conf=7,7 term=true asdus=C_SC_NA_1/7,C_SC_NA_1/7,M_SP_TB_1/11,C_SC_NA_1/10	-	command --type C_SC_NA_1 --ioa 510 --value false --mode sbo
+rw	0	ok=true error=- conf=7,9 term=false asdus=C_SC_NA_1/7,C_SC_NA_1/9	-	command --type C_SC_NA_1 --ioa 510 --value true --mode cancel
+rw	0	ok=true error=- conf=7 term=false asdus=C_SC_NA_1/7	-	command --type C_SC_NA_1 --ioa 510 --value true --mode select
+ro	0	ok=true error=- conf= term=false asdus=F_FR_NA_1/13,F_SR_NA_1/13,F_SG_NA_1/13,F_SG_NA_1/13,F_SG_NA_1/13,F_SG_NA_1/13,F_SG_NA_1/13,F_LS_NA_1/13,F_LS_NA_1/13	server:fileServer,client:fileClient	file-get --ioa 30000
+ro	0	ok=true error=- conf= term=false asdus=F_FR_NA_1/13,F_SR_NA_1/13,F_SG_NA_1/13,F_SG_NA_1/13,F_SG_NA_1/13,F_SG_NA_1/13,F_SG_NA_1/13,F_SG_NA_1/13,F_SG_NA_1/13,F_SG_NA_1/13,F_SG_NA_1/13,F_LS_NA_1/13,F_SR_NA_1/13,F_SG_NA_1/13,F_SG_NA_1/13,F_SG_NA_1/13,F_SG_NA_1/13,F_SG_NA_1/13,F_SG_NA_1/13,F_SG_NA_1/13,F_SG_NA_1/13,F_SG_NA_1/13,F_LS_NA_1/13,F_SR_NA_1/13,F_SG_NA_1/13,F_SG_NA_1/13,F_SG_NA_1/13,F_SG_NA_1/13,F_LS_NA_1/13,F_LS_NA_1/13	server:fileServer,client:fileClient	file-get --ioa 30001
+ro	1	ok=false error=negative-confirmation conf= term=false asdus=F_SC_NA_1/47	server:fileServer,client:fileClient	file-get --ioa 39999
+ro	1	ok=false error=negative-confirmation conf= term=false asdus=F_SC_NA_1/47	server:fileServer,client:fileClient	file-get --ioa 30000 --name 9
