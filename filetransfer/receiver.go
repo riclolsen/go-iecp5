@@ -27,6 +27,7 @@ type Receiver struct {
 	ioa        asdu.InfoObjAddr
 	nof        asdu.NameOfFile
 	nos        byte
+	called     bool // call file was sent after the file ready
 	sectionBuf []byte
 	fileBuf    []byte
 
@@ -85,6 +86,7 @@ func (sf *Receiver) Abort() {
 // reset clears the transfer state. The caller must hold the lock.
 func (sf *Receiver) reset() {
 	sf.active = false
+	sf.called = false
 	sf.sectionBuf = nil
 	sf.fileBuf = nil
 	sf.nos = 0
@@ -104,8 +106,8 @@ func (sf *Receiver) RequestDirectory(c asdu.Connect, ca asdu.CommonAddr) error {
 }
 
 // RequestFile selects a file for transfer ([F_SC_NA_1] with SCQ = select
-// file). The outstation answers with the first section, and the transfer
-// then runs on its own until the file is complete.
+// file). The outstation answers with the file ready, the receiver calls the
+// file, and the transfer then runs on its own until the file is complete.
 func (sf *Receiver) RequestFile(c asdu.Connect, ca asdu.CommonAddr, ioa asdu.InfoObjAddr, nof asdu.NameOfFile) error {
 	sf.mu.Lock()
 	if sf.active {
@@ -143,7 +145,16 @@ func (sf *Receiver) Handle(c asdu.Connect, a *asdu.ASDU) (bool, error) {
 	actions, done, err := sf.step(a)
 	sf.mu.Unlock()
 
-	// Callbacks and sends run outside the lock.
+	// Sends and callbacks run outside the lock. The acknowledgement goes
+	// out before a completed file is delivered, so a caller that closes the
+	// connection from the callback cannot cut the final acknowledgement off.
+	var sendErr error
+	for _, act := range actions {
+		if sendErr = act(c); sendErr != nil {
+			sf.Abort()
+			break
+		}
+	}
 	if done != nil {
 		if sf.store != nil {
 			if writeErr := sf.store.Write(done.entry.Ioa, done.entry.Nof, done.data); writeErr != nil && err == nil {
@@ -154,11 +165,8 @@ func (sf *Receiver) Handle(c asdu.Connect, a *asdu.ASDU) (bool, error) {
 			sf.onFile(done.entry, done.data)
 		}
 	}
-	for _, act := range actions {
-		if sendErr := act(c); sendErr != nil {
-			sf.Abort()
-			return true, sendErr
-		}
+	if sendErr != nil {
+		return true, sendErr
 	}
 	return true, err
 }
@@ -189,7 +197,22 @@ func (sf *Receiver) step(a *asdu.ASDU) ([]action, *completed, error) {
 			sf.reset()
 			return nil, nil, ErrFileNotFound
 		}
-		if !sf.autoAccept || sf.active {
+		if sf.active {
+			// Answer to our select: call the file (once).
+			if sf.called || info.Ioa != sf.ioa || info.Nof != sf.nof {
+				return nil, nil, nil
+			}
+			sf.called = true
+			ca, ioa, nof := sf.ca, sf.ioa, sf.nof
+			return []action{func(c asdu.Connect) error {
+				return asdu.CallOrSelectFile(c, asdu.CauseOfTransmission{Cause: asdu.FileTransfer}, ca,
+					asdu.CallOrSelectFileInfo{
+						Ioa: ioa, Nof: nof,
+						Scq: asdu.SelectAndCallQualifier{Action: asdu.SCQRequestFile},
+					})
+			}}, nil, nil
+		}
+		if !sf.autoAccept {
 			return nil, nil, nil
 		}
 		sf.active = true
@@ -286,6 +309,19 @@ func (sf *Receiver) onLastSectionOrSegment(a *asdu.ASDU) ([]action, *completed, 
 		// End of the file: acknowledge and deliver.
 		data := sf.fileBuf
 		nos := info.Nos
+		if asdu.FileChecksum(data) != info.Chs {
+			sf.reset()
+			return []action{func(c asdu.Connect) error {
+				return asdu.AckFileOrSection(c, asdu.CauseOfTransmission{Cause: asdu.FileTransfer}, ca,
+					asdu.AckFileOrSectionInfo{
+						Ioa: ioa, Nof: nof, Nos: nos,
+						Afq: asdu.AckFileOrSectionQualifier{
+							Action: asdu.AFQNegAckFile,
+							Error:  asdu.FileErrChecksumFailed,
+						},
+					})
+			}}, nil, ErrChecksum
+		}
 		done := &completed{
 			entry: Entry{Ioa: ioa, Nof: nof, Size: uint32(len(data))},
 			data:  data,

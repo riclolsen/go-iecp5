@@ -139,14 +139,29 @@ func (sf *Sender) onCallOrSelect(c asdu.Connect, a *asdu.ASDU) ([]action, error)
 	case asdu.SCQDefault: // call directory
 		return sf.directoryActions(ca)
 
-	case asdu.SCQSelectFile, asdu.SCQRequestFile:
-		data, err := sf.store.Read(req.Ioa, req.Nof)
-		if err != nil {
+	case asdu.SCQSelectFile:
+		// Select file: the file becomes the current one and its length is
+		// announced with [F_FR_NA_1]; the controlling station then calls it.
+		if err := sf.load(ca, req); err != nil {
 			return sf.negAckFileActions(ca, req, asdu.FileErrUnexpectedNameOfFile), err
 		}
-		sf.active = true
-		sf.ca, sf.ioa, sf.nof = ca, req.Ioa, req.Nof
-		sf.sections = splitSections(data, sf.sectionSize)
+		length := uint32(0)
+		for _, s := range sf.sections {
+			length += uint32(len(s))
+		}
+		info := asdu.FileReadyInfo{Ioa: req.Ioa, Nof: req.Nof, LengthOfFile: length, Frq: asdu.FileReadyQualifier{}}
+		return []action{func(c asdu.Connect) error {
+			return asdu.FileReady(c, asdu.CauseOfTransmission{Cause: asdu.FileTransfer}, ca, info)
+		}}, nil
+
+	case asdu.SCQRequestFile:
+		// Call file: serve the first section. A call without a preceding
+		// select is accepted and selects the file implicitly.
+		if !sf.active || sf.ioa != req.Ioa || sf.nof != req.Nof {
+			if err := sf.load(ca, req); err != nil {
+				return sf.negAckFileActions(ca, req, asdu.FileErrUnexpectedNameOfFile), err
+			}
+		}
 		sf.cur = 0
 		return sf.sectionReadyActions(), nil
 
@@ -220,6 +235,20 @@ func (sf *Sender) onAck(c asdu.Connect, a *asdu.ASDU) ([]action, error) {
 		return nil, nil
 	}
 	return nil, nil
+}
+
+// load makes the requested file the current transfer. The caller must hold
+// the lock.
+func (sf *Sender) load(ca asdu.CommonAddr, req asdu.CallOrSelectFileInfo) error {
+	data, err := sf.store.Read(req.Ioa, req.Nof)
+	if err != nil {
+		return err
+	}
+	sf.active = true
+	sf.ca, sf.ioa, sf.nof = ca, req.Ioa, req.Nof
+	sf.sections = splitSections(data, sf.sectionSize)
+	sf.cur = 0
+	return nil
 }
 
 // directoryActions builds the directory reply [F_DR_TA_1].
@@ -309,11 +338,16 @@ func (sf *Sender) sectionDataActions() []action {
 
 // lastSectionActions closes the file [F_LS_NA_1 with LSQ = file].
 func (sf *Sender) lastSectionActions() []action {
+	var chs byte // checksum of the whole file
+	for _, sec := range sf.sections {
+		chs += asdu.FileChecksum(sec)
+	}
 	info := asdu.LastSectionOrSegmentInfo{
 		Ioa: sf.ioa,
 		Nof: sf.nof,
 		Nos: byte(len(sf.sections)),
 		Lsq: asdu.LSQFileWithoutDeactivate,
+		Chs: chs,
 	}
 	ca := sf.ca
 	return []action{func(c asdu.Connect) error {

@@ -1,0 +1,16 @@
+# Cases that are expected to fail today, for the interoperability tests.
+#
+# Same idea as tests/known-bugs.tsv of github.com/otfabric/iec104-interop: a
+# matching case may fail and is reported as skipped, with the reason. When it
+# passes, the test fails ("stale entry") so the entry gets removed and the fix
+# is locked in.
+#
+# Columns, separated by tabs:
+#   1  direction  "master" (go-iecp5 client against a reference station) or
+#                 "outstation" (go-iecp5 station against a reference client)
+#   2  adapter    reference implementation involved, or "*" for any
+#   3  regexp     extended regular expression matched against the case's
+#                 operation and flags
+#   4  reason
+master	openmuc	^read( |$)	upstream: j60870 1.8.0 cannot decode C_RD_NA_1 and closes the connection (tests/known-bugs.tsv of iec104-interop)
+outstation	openmuc	^read --ioa 999$	upstream: j60870 1.8.0 cannot decode C_RD_NA_1, here the station's refusal, and closes the connection
