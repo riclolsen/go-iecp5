@@ -6,8 +6,11 @@ package cs104
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"net"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -15,6 +18,8 @@ import (
 
 	"github.com/riclolsen/go-iecp5/asdu"
 	"github.com/riclolsen/go-iecp5/clog"
+	"github.com/riclolsen/go-iecp5/internal/secasdu"
+	"github.com/riclolsen/go-iecp5/secevent"
 )
 
 const (
@@ -56,6 +61,25 @@ type SrvSession struct {
 	cancel       context.CancelFunc
 	ctx          context.Context
 	serverNumber int
+
+	// security events
+	cyber     *secevent.Emitter
+	sessionID atomic.Uint64
+	inbound   bool // accepted by a Server, as opposed to dialled out
+	peerMu    sync.RWMutex
+	peer      secevent.PeerInfo
+	started   time.Time
+	framesIn  atomic.Uint64 // frames that parsed
+	framesOut atomic.Uint64
+	endMu     sync.Mutex
+	endReason string
+	guard     *secevent.Guard
+	pol       secevent.Policy
+	fl        *secasdu.FrameLimits
+	insp      *secasdu.Inspector
+	// admission result handed over by the Server, consumed by beginCyber
+	presetID   uint64
+	presetPeer *secevent.PeerInfo
 }
 
 // RecvLoop feeds t.rcvRaw.
@@ -67,64 +91,24 @@ func (sf *SrvSession) recvLoop() {
 		sf.Debug("recvLoop stopped!")
 	}()
 
+	fr := newFrameReader(sf.conn, sf.config.SendUnAckTimeout1)
+	if sf.cyberOn() {
+		fr.hook = func(k secevent.Kind, detail string, raw []byte) {
+			sf.emit(secevent.Event{Kind: k, Action: secevent.ActIgnored, Detail: detail, Raw: raw})
+		}
+	}
 	for {
-		rawData := make([]byte, APDUSizeMax)
-		for rdCnt, length := 0, 2; rdCnt < length; {
-			byteCount, err := io.ReadFull(sf.conn, rawData[rdCnt:length])
-			if err != nil {
-				// See: https://github.com/golang/go/issues/4373
-				if err != io.EOF && err != io.ErrClosedPipe ||
-					strings.Contains(err.Error(), "use of closed network connection") {
-					sf.Error("receive failed, %v", err)
-					return
-				}
-
-				if e, ok := err.(net.Error); ok && !e.Temporary() {
-					sf.Error("receive failed, %v", err)
-					return
-				}
-
-				if byteCount == 0 && err == io.EOF {
-					sf.Error("remote connect closed, %v", err)
-					return
-				}
-			}
-
-			rdCnt += byteCount
-			if rdCnt == 0 {
-				continue
-			} else if rdCnt == 1 {
-				if rawData[0] != startFrame {
-					rdCnt = 0
-					continue
-				}
-			} else {
-				if rawData[0] != startFrame {
-					// resync: keep a start character seen in the second
-					// position instead of discarding it
-					if rawData[1] == startFrame {
-						rawData[0] = startFrame
-						rdCnt, length = 1, 2
-					} else {
-						rdCnt, length = 0, 2
-					}
-					continue
-				}
-				length = int(rawData[1]) + 2
-				if length < APCICtlFiledSize+2 || length > APDUSizeMax {
-					rdCnt, length = 0, 2
-					continue
-				}
-				if rdCnt == length {
-					apdu := rawData[:length]
-					sf.Debug("RX Raw[% x]", apdu)
-					select {
-					case sf.rcvRaw <- apdu:
-					case <-sf.ctx.Done():
-						return
-					}
-				}
-			}
+		apdu, err := fr.next()
+		if err != nil {
+			sf.Error("receive failed, %v", err)
+			sf.noteEnd(fmt.Sprintf("receive failed: %v", err))
+			return
+		}
+		sf.Debug("RX Raw[% x]", apdu)
+		select {
+		case sf.rcvRaw <- apdu:
+		case <-sf.ctx.Done():
+			return
 		}
 	}
 }
@@ -144,17 +128,30 @@ func (sf *SrvSession) sendLoop() {
 			return
 		case apdu := <-sf.sendRaw:
 			sf.Debug("TX Raw[% x]", apdu)
+			sf.framesOut.Add(1)
 			for wrCnt := 0; len(apdu) > wrCnt; {
+				// A peer that stops reading must not be able to hold this
+				// goroutine, and with it the state machine, for ever.
+				_ = sf.conn.SetWriteDeadline(time.Now().Add(sf.config.SendUnAckTimeout1))
 				byteCount, err := sf.conn.Write(apdu[wrCnt:])
+				if errors.Is(err, os.ErrDeadlineExceeded) {
+					sf.Error("sendRaw stalled for longer than t₁, peer is not reading: %v", err)
+					sf.noteEnd("peer stopped reading (write stalled for t₁)")
+					sf.emit(secevent.Event{Kind: secevent.KindDoSWriteStall, Action: secevent.ActDisconnected,
+						Detail: "peer is not reading: a write was blocked for longer than t₁", Err: err})
+					return
+				}
 				if err != nil {
 					// See: https://github.com/golang/go/issues/4373
 					if err != io.EOF && err != io.ErrClosedPipe ||
 						strings.Contains(err.Error(), "use of closed network connection") {
 						sf.Error("sendRaw failed, %v", err)
+						sf.noteEnd(fmt.Sprintf("send failed: %v", err))
 						return
 					}
 					if e, ok := err.(net.Error); !ok || !e.Temporary() {
 						sf.Error("sendRaw failed, %v", err)
+						sf.noteEnd(fmt.Sprintf("send failed: %v", err))
 						return
 					}
 					// temporary error may be recoverable
@@ -173,6 +170,7 @@ func (sf *SrvSession) run(ctx context.Context) {
 
 	sf.ctx, sf.cancel = context.WithCancel(ctx)
 	sf.setConnectStatus(connected)
+	sf.beginCyber()
 	sf.wg.Add(3)
 	go sf.recvLoop()
 	go sf.sendLoop()
@@ -184,6 +182,12 @@ func (sf *SrvSession) run(ctx context.Context) {
 	// for the I-frames already sent to be acknowledged.
 	var pendingStopDt = false
 	var checkTicker = time.NewTicker(timeoutResolution)
+	var everActive = false
+	var inactiveLimit time.Duration
+	if sf.guard != nil {
+		inactiveLimit = sf.guard.Policy().InactiveTimeout
+	}
+	var connectedAt = time.Now()
 
 	// transmission timestamps for timeout calculation
 	var willNotTimeout = time.Now().Add(time.Hour * 24 * 365 * 100)
@@ -197,11 +201,11 @@ func (sf *SrvSession) run(ctx context.Context) {
 
 	sendSFrame := func(rcvSN uint16) {
 		sf.Debug("TX sFrame %v", sAPCI{rcvSN})
-		sf.sendRaw <- newSFrame(rcvSN)
+		sf.queueRaw(newSFrame(rcvSN))
 	}
 	sendUFrame := func(which byte) {
 		sf.Debug("TX uFrame %v", uAPCI{which})
-		sf.sendRaw <- newUFrame(which)
+		sf.queueRaw(newUFrame(which))
 	}
 
 	// confirmStopDtIfDone answers a STOPDT activation once the I-frames that
@@ -232,7 +236,7 @@ func (sf *SrvSession) run(ctx context.Context) {
 		sf.pending = append(sf.pending, seqPending{seqNo & 32767, time.Now()})
 
 		sf.Debug("TX iFrame %v", iAPCI{seqNo, sf.seqNoRcv})
-		sf.sendRaw <- iframe
+		sf.queueRaw(iframe)
 	}
 	if sf.onConnection != nil {
 		sf.onConnection(sf)
@@ -242,6 +246,7 @@ func (sf *SrvSession) run(ctx context.Context) {
 		checkTicker.Stop()
 		_ = sf.conn.Close() // chain trigger cancel
 		sf.wg.Wait()
+		sf.endCyber()
 		if sf.connectionLost != nil {
 			sf.connectionLost(sf)
 		}
@@ -271,6 +276,16 @@ func (sf *SrvSession) run(ctx context.Context) {
 				// now.Sub(startDtActiveSendSince) >= t.SendUnAckTimeout1 ||
 				// now.Sub(stopDtActiveSendSince) >= t.SendUnAckTimeout1 ||
 				sf.Error("test frame alive confirm timeout t₁")
+				sf.noteEnd("TESTFR not confirmed within t₁")
+				sf.emit(secevent.Event{Kind: secevent.KindConnT1Timeout, Action: secevent.ActDisconnected,
+					Detail: "TESTFR act was not confirmed within t₁"})
+				return
+			}
+			if inactiveLimit > 0 && !everActive && now.Sub(connectedAt) >= inactiveLimit {
+				sf.Error("session never started data transfer, closing")
+				sf.noteEnd("STARTDT never received")
+				sf.emit(secevent.Event{Kind: secevent.KindConnNeverStarted, Action: secevent.ActDisconnected,
+					Detail: fmt.Sprintf("no STARTDT within %v of connecting", inactiveLimit)})
 				return
 			}
 			// check oldest unacknowledged outbound
@@ -279,6 +294,9 @@ func (sf *SrvSession) run(ctx context.Context) {
 				now.Sub(sf.pending[0].sendTime) >= sf.config.SendUnAckTimeout1 {
 				sf.ackNoSend++
 				sf.Error("fatal transmission timeout t₁")
+				sf.noteEnd("I-frame not acknowledged within t₁")
+				sf.emit(secevent.Event{Kind: secevent.KindConnT1Timeout, Action: secevent.ActDisconnected,
+					Detail: "an I-frame was not acknowledged within t₁"})
 				return
 			}
 
@@ -290,8 +308,11 @@ func (sf *SrvSession) run(ctx context.Context) {
 				sf.ackNoRcv = sf.seqNoRcv
 			}
 
-			// When the idle time is up, send a TestFrActive frame to keep alive
-			if now.Sub(idleTimeout3Sine) >= sf.config.IdleTimeout3 {
+			// When the idle time is up, send a TestFrActive frame to keep alive. Only
+			// one is outstanding at a time: sending another would restart the t₁
+			// clock, and a peer that never answers would then never be dropped
+			// when t₃ is shorter than t₁.
+			if testFrAliveSendSince == willNotTimeout && now.Sub(idleTimeout3Sine) >= sf.config.IdleTimeout3 {
 				sendUFrame(uTestFrActive)
 				testFrAliveSendSince = time.Now()
 				idleTimeout3Sine = testFrAliveSendSince
@@ -299,6 +320,9 @@ func (sf *SrvSession) run(ctx context.Context) {
 
 		case apdu := <-sf.rcvRaw:
 			idleTimeout3Sine = time.Now() // Every time an i frame, S frame, U frame is received, the idle timer is reset, t3
+			if sf.fl != nil && sf.frameFlood(sf.fl.Frames, secevent.KindFloodFrames, "inbound frame rate") {
+				return
+			}
 			apci, asduVal, err := parse(apdu)
 			if err != nil {
 				// A malformed control field is not acted on. Ignoring it
@@ -306,13 +330,21 @@ func (sf *SrvSession) run(ctx context.Context) {
 				// to drop the connection with a single bad frame; the log
 				// line is what makes the sender's fault visible.
 				sf.Error("%v, frame ignored [% x]", err, apdu)
+				sf.emit(secevent.Event{Kind: secevent.KindProtoBadAPCI, Action: secevent.ActIgnored,
+					Detail: "malformed APCI: frame not acted on", Err: err, Raw: apdu})
 				continue
 			}
+			sf.framesIn.Add(1)
 			switch head := apci.(type) {
 			case sAPCI:
 				sf.Debug("RX sFrame %v", head)
+				if sf.fl != nil && head.rcvSN == sf.ackNoSend &&
+					sf.frameFlood(sf.fl.SFrames, secevent.KindFloodSFrames, "rate of S-frames that acknowledge nothing new") {
+					return
+				}
 				if !sf.updateAckNoOut(head.rcvSN) {
 					sf.Error("fatal incoming acknowledge either earlier than previous or later than sendTime")
+					sf.seqViolation(ackKind(sf.ackNoSend, sf.seqNoSend, head.rcvSN), 0, head.rcvSN, apdu)
 					return
 				}
 				confirmStopDtIfDone()
@@ -326,10 +358,18 @@ func (sf *SrvSession) run(ctx context.Context) {
 						confirmStopDtIfDone()
 					}
 					sf.Warn("station not active")
+					sf.emit(secevent.Event{Kind: secevent.KindProtoIWhileStopped, Action: secevent.ActIgnored,
+						Detail: "I-frame received while data transfer is stopped: discarded", Raw: apdu})
 					break // not active, discard apdu
 				}
-				if !sf.updateAckNoOut(head.rcvSN) || head.sendSN != sf.seqNoRcv {
+				if !sf.updateAckNoOut(head.rcvSN) {
 					sf.Error("fatal incoming acknowledge either earlier than previous or later than sendTime")
+					sf.seqViolation(ackKind(sf.ackNoSend, sf.seqNoSend, head.rcvSN), head.sendSN, head.rcvSN, apdu)
+					return
+				}
+				if head.sendSN != sf.seqNoRcv {
+					sf.Error("fatal incoming acknowledge either earlier than previous or later than sendTime")
+					sf.seqViolation(sendSNKind(head.sendSN, sf.seqNoRcv), head.sendSN, head.rcvSN, apdu)
 					return
 				}
 
@@ -343,6 +383,10 @@ func (sf *SrvSession) run(ctx context.Context) {
 				}
 
 				sf.seqNoRcv = (sf.seqNoRcv + 1) & 32767
+				// No check of the peer's k here: we acknowledge every w
+				// frames, so from this side the count never passes w, and
+				// with acknowledgements in flight a peer overrunning k
+				// cannot be told apart from one that is not.
 				if seqNoCount(sf.ackNoRcv, sf.seqNoRcv) >= sf.config.RecvUnAckLimitW {
 					sendSFrame(sf.seqNoRcv)
 					sf.ackNoRcv = sf.seqNoRcv
@@ -352,8 +396,13 @@ func (sf *SrvSession) run(ctx context.Context) {
 				sf.Debug("RX uFrame %v", head)
 				switch head.function {
 				case uStartDtActive:
+					if sf.fl != nil && sf.frameFlood(sf.fl.UToggle, secevent.KindFloodUToggle, "STARTDT/STOPDT rate") {
+						return
+					}
+					sf.emit(secevent.Event{Kind: secevent.KindCtrlStartDT, Detail: "STARTDT act received"})
 					sendUFrame(uStartDtConfirm)
 					isActive = true
+					everActive = true
 					// A new STARTDT supersedes a STOPDT still waiting for its
 					// acknowledgements. Left set, the next acknowledgement
 					// would emit a STOPDT con on a session the controlling
@@ -363,6 +412,10 @@ func (sf *SrvSession) run(ctx context.Context) {
 				// 	isActive = true
 				// 	startDtActiveSendSince = willNotTimeout
 				case uStopDtActive:
+					if sf.fl != nil && sf.frameFlood(sf.fl.UToggle, secevent.KindFloodUToggle, "STARTDT/STOPDT rate") {
+						return
+					}
+					sf.emit(secevent.Event{Kind: secevent.KindCtrlStopDT, Detail: "STOPDT act received"})
 					// Stop handing out new I-frames at once, but do not
 					// confirm yet: the confirmation says data transfer has
 					// finished, and I-frames already sent may still be
@@ -392,9 +445,20 @@ func (sf *SrvSession) run(ctx context.Context) {
 				// 	isActive = false
 				// 	stopDtActiveSendSince = willNotTimeout
 				case uTestFrActive:
+					if sf.fl != nil && sf.frameFlood(sf.fl.TestFR, secevent.KindFloodTestFR, "TESTFR act rate (keep-alive storm)") {
+						return
+					}
 					sendUFrame(uTestFrConfirm)
 				case uTestFrConfirm:
+					if testFrAliveSendSince == willNotTimeout {
+						sf.emit(secevent.Event{Kind: secevent.KindUnsolUConfirm, Action: secevent.ActIgnored,
+							Detail: "TESTFR con received with no TESTFR act outstanding"})
+					}
 					testFrAliveSendSince = willNotTimeout
+				case uStartDtConfirm, uStopDtConfirm:
+					// Monitor-direction frames: only an outstation sends them.
+					sf.emit(secevent.Event{Kind: secevent.KindProtoUWrongDir, Action: secevent.ActIgnored,
+						Detail: fmt.Sprintf("%v received by the controlled station: wrong direction", head)})
 				default:
 					sf.Error("illegal U-Frame functions[0x%02x] ignored", head.function)
 				}
@@ -419,6 +483,11 @@ func (sf *SrvSession) handlerLoop() {
 			asduPack := asdu.NewEmptyASDU(sf.params)
 			if err := asduPack.UnmarshalBinary(rawAsdu); err != nil {
 				sf.Error("asdu UnmarshalBinary failed,%+v", err)
+				sf.emit(secevent.Event{Kind: secevent.KindProtoASDUInvalid, Action: secevent.ActIgnored,
+					Detail: "ASDU rejected by the decoder: " + err.Error(), Err: err, Raw: rawAsdu})
+				continue
+			}
+			if sf.inspect(asduPack, rawAsdu) {
 				continue
 			}
 			if err := sf.serverHandler(asduPack); err != nil {
@@ -609,7 +678,14 @@ func (sf *SrvSession) Params() *asdu.Params {
 }
 
 // Send asdu frame
-func (sf *SrvSession) Send(u *asdu.ASDU) error {
+func (sf *SrvSession) Send(u *asdu.ASDU) error { return sf.send(u, true) }
+
+// send queues an ASDU. observe says whether a refusal in it is reported as a
+// security event; the library's own refusals were reported when decided.
+func (sf *SrvSession) send(u *asdu.ASDU, observe bool) error {
+	if observe {
+		sf.observeOutbound(u)
+	}
 	if !sf.IsConnected() {
 		return ErrUseClosedConnection
 	}
@@ -628,4 +704,23 @@ func (sf *SrvSession) Send(u *asdu.ASDU) error {
 // UnderlyingConn got under net.conn
 func (sf *SrvSession) UnderlyingConn() net.Conn {
 	return sf.conn
+}
+
+// queueRaw hands a frame to the send loop. It gives up when the session ends:
+// the send loop is the only reader of sendRaw, so once it has stopped, for
+// instance because the peer stopped reading, a bare channel send here would
+// block the state machine for ever instead of letting it tear the session down.
+func (sf *SrvSession) queueRaw(b []byte) {
+	select {
+	case sf.sendRaw <- b:
+	case <-sf.ctx.Done():
+	}
+}
+
+// seqViolation reports the sequence error that is about to close the session.
+func (sf *SrvSession) seqViolation(kind secevent.Kind, send, recv uint16, raw []byte) {
+	sf.noteEnd("sequence error: " + string(kind))
+	sf.emit(secevent.Event{Kind: kind, Action: secevent.ActDisconnected, Fields: secevent.FieldSeq,
+		SendSN: send, RecvSN: recv, ExpectedSN: sf.seqNoRcv, Raw: raw,
+		Detail: seqDetail(kind, send, recv, sf.seqNoRcv, sf.ackNoSend, sf.seqNoSend)})
 }

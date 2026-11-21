@@ -168,6 +168,7 @@ func (sf *Receiver) Handle(c asdu.Connect, a *asdu.ASDU) (bool, error) {
 	if sendErr != nil {
 		return true, sendErr
 	}
+	report(c, a, err)
 	return true, err
 }
 

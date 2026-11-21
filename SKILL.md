@@ -304,6 +304,18 @@ friends are the predefined names. Implement `filetransfer.Store` to back
 transfers with disk or a database. Transfers are round-trip heavy — see the
 throughput note in `docs/cs104.md`.
 
+## Recipe: security events
+
+```go
+srv.SetCyberEventSink(secevent.JSONLinesSink(os.Stdout)) // cs104/cs101 server, client, cs103 client
+p := secevent.DefaultPolicy()                           // report-only until you opt in
+p.AllowedPeers = []netip.Prefix{netip.MustParsePrefix("10.0.0.0/24")}
+srv.SetSecurityPolicy(p)
+```
+
+From a handler use `secevent.Report(conn, event)`; `session.PeerInfo()` gives the
+peer address and MAC (same-link peers only). Details: `docs/security.md`.
+
 ## Cause-of-transmission cheat sheet
 
 | Situation | COT to use |

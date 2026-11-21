@@ -112,6 +112,7 @@ func (sf *Sender) Handle(c asdu.Connect, a *asdu.ASDU) (bool, error) {
 			return true, sendErr
 		}
 	}
+	report(c, a, err)
 	return true, err
 }
 

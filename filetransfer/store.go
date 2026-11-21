@@ -39,6 +39,7 @@ import (
 	"time"
 
 	"github.com/riclolsen/go-iecp5/asdu"
+	"github.com/riclolsen/go-iecp5/secevent"
 )
 
 // Errors of the filetransfer package.
@@ -203,4 +204,26 @@ func splitSections(data []byte, sectionSize int) [][]byte {
 		out = append(out, data[off:end])
 	}
 	return out
+}
+
+// report raises a security event for a file transfer problem through the
+// connection's endpoint. It does nothing when the connection raises no events.
+func report(c asdu.Connect, a *asdu.ASDU, err error) {
+	if err == nil {
+		return
+	}
+	kind := secevent.KindFileRejected
+	act := secevent.ActRejected
+	switch {
+	case errors.Is(err, ErrChecksum):
+		kind = secevent.KindFileChecksum
+	case errors.Is(err, ErrUnsupported):
+		kind, act = secevent.KindFileUnsupported, secevent.ActIgnored
+	}
+	e := secevent.Event{
+		Kind: kind, Action: act, Detail: err.Error(), Err: err,
+		Fields: secevent.FieldType | secevent.FieldCause | secevent.FieldCommonAddr,
+		TypeID: a.Type, Cause: a.Coa.Cause, CommonAddr: a.CommonAddr,
+	}
+	secevent.Report(c, e)
 }

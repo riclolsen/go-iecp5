@@ -7,12 +7,14 @@ package cs104
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math/rand"
 	"sync/atomic"
 	"time"
 
 	"github.com/riclolsen/go-iecp5/asdu"
 	"github.com/riclolsen/go-iecp5/clog"
+	"github.com/riclolsen/go-iecp5/secevent"
 )
 
 // ServerSpecial server special interface
@@ -35,11 +37,12 @@ type serverSpec struct {
 	SrvSession
 	option      ClientOption
 	closeCancel context.CancelFunc
+	cyber       secevent.Emitter
 }
 
 // NewServerSpecial new special server
 func NewServerSpecial(handler ServerHandlerInterface, o *ClientOption) ServerSpecial {
-	return &serverSpec{
+	sf := &serverSpec{
 		SrvSession: SrvSession{
 			config:  &o.config,
 			params:  &o.params,
@@ -54,6 +57,10 @@ func NewServerSpecial(handler ServerHandlerInterface, o *ClientOption) ServerSpe
 		},
 		option: *o,
 	}
+	sf.cyber.Protocol, sf.cyber.Role = "iec104", "server-special"
+	sf.SrvSession.cyber = &sf.cyber
+	sf.SrvSession.guard = guardFor(o.policy, &sf.cyber)
+	return sf
 }
 
 // SetOnConnectHandler set on connect handler
@@ -100,6 +107,10 @@ func (sf *serverSpec) running() {
 		conn, err := openConnection(sf.option.server, sf.option.TLSConfig, sf.config.ConnectTimeout0)
 		if err != nil {
 			sf.Error("connect failed, %v", err)
+			sf.emit(secevent.Event{Kind: secevent.KindConnDialFailed, Err: err,
+				Peer:   secevent.PeerInfo{Network: "tcp"},
+				Detail: fmt.Sprintf("could not connect to %v", sf.option.server)})
+			reportDialError(sf.emit, err)
 			if !sf.option.autoReconnect {
 				return
 			}

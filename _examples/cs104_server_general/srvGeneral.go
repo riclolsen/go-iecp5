@@ -16,11 +16,13 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"os"
 	"time"
 
 	"github.com/riclolsen/go-iecp5/asdu"
 	"github.com/riclolsen/go-iecp5/cs104"
 	"github.com/riclolsen/go-iecp5/filetransfer"
+	"github.com/riclolsen/go-iecp5/secevent"
 )
 
 // Files this outstation offers for transfer, addressed independently of
@@ -36,6 +38,7 @@ func main() {
 		period = flag.Duration("period", time.Second, "how often the process advances and reports")
 		quiet  = flag.Bool("quiet", false, "do not log the protocol")
 		offer  = flag.Bool("offer-file", true, "announce the disturbance record after a master connects")
+		secEv  = flag.Bool("security-events", false, "print security events as JSON lines on stderr")
 		scale  = flag.Int("scale", 1, "repeat the whole address plan this many times, at 10000 address strides — for testing a master against a large database")
 	)
 	flag.Parse()
@@ -49,6 +52,9 @@ func main() {
 
 	srv := cs104.NewServer(h)
 	srv.LogMode(!*quiet)
+	if *secEv {
+		srv.SetCyberEventSink(secevent.JSONLinesSink(os.Stderr))
+	}
 	srv.SetOnConnectionHandler(func(c asdu.Connect) {
 		log.Println("master connected")
 		// A device that has just come up says so, and a master uses that to

@@ -17,6 +17,7 @@ import (
 
 	"github.com/riclolsen/go-iecp5/asdu"
 	"github.com/riclolsen/go-iecp5/clog"
+	"github.com/riclolsen/go-iecp5/secevent"
 )
 
 // Connection states
@@ -72,6 +73,7 @@ type pendingSend struct {
 
 // Client is an IEC101 Primary Station (Master)
 type Client struct {
+	cyber        clientCyber
 	option       ClientOption
 	port         io.ReadWriteCloser // Serial port connection
 	handler      ClientHandlerInterface
@@ -158,6 +160,7 @@ func NewClient(handler ClientHandlerInterface, o *ClientOption) *Client {
 		onConnectError:   func(*Client, error) {},
 	}
 	client.Clog.LogMode(true) // Enable logging by default
+	client.cyber.em.Protocol, client.cyber.em.Role = "iec101", "client"
 	return client
 }
 
@@ -209,6 +212,7 @@ func (sf *Client) Start() error {
 func (sf *Client) connectionManager() {
 	sf.Debug("Connection manager started")
 	transporter := NewTransporter(sf.option.config.Transport, sf.option.config.Serial, sf.option.config.TCP)
+	transporter.SetBusyHandler(sf.reportBusy)
 	defer func() {
 		_ = transporter.Close()
 		sf.setConnectStatus(statusInitial)
@@ -611,6 +615,8 @@ func (sf *Client) handleIncomingFrame(frame *Frame) error {
 	sec := sf.secs[receivedAddr]
 	if sf.option.config.LinkAddrSize > 0 && sec == nil {
 		sf.Warn("Ignoring frame with unexpected link address %d", receivedAddr)
+		sf.emit(sf.linkEvent(secevent.KindLinkUnexpectedAddr, secevent.ActIgnored,
+			fmt.Sprintf("frame from link address %d, which is not a station this client polls", receivedAddr), frame))
 		return nil // Ignore frames from unknown stations
 	}
 
@@ -621,6 +627,7 @@ func (sf *Client) handleIncomingFrame(frame *Frame) error {
 		// where the peer also acts as a primary.
 		if !sf.isBalanced() {
 			sf.Warn("Received unexpected frame with PRM=1 in unbalanced mode: %s", ctrl)
+			sf.emit(sf.linkEvent(secevent.KindLinkWrongPRM, secevent.ActIgnored, "a station sent a primary frame in unbalanced mode", frame))
 			return nil
 		}
 		return sf.handlePeerPrimaryFrame(frame, ctrl, receivedAddr)
@@ -704,6 +711,8 @@ func (sf *Client) handlePeerPrimaryFrame(frame *Frame, ctrl ControlField, addr u
 	if ctrl.FCV {
 		if ctrl.FCB != sf.fcbExpected {
 			sf.Warn("Peer frame with unexpected FCB: repeated frame, re-sending ACK.")
+			sf.emit(sf.linkEvent(secevent.KindSeqFCBRepeat, secevent.ActObserved,
+				fmt.Sprintf("FCB %v, expected %v: repeated or replayed frame", ctrl.FCB, sf.fcbExpected), frame))
 			return sf.sendSecFixed(SecFcConfACK, addr)
 		}
 		sf.fcbExpected = !sf.fcbExpected
@@ -729,6 +738,8 @@ func (sf *Client) handlePeerPrimaryFrame(frame *Frame, ctrl ControlField, addr u
 			sf.dispatchASDU(a)
 		} else {
 			sf.Warn("Failed to decode ASDU from peer user data frame")
+			sf.emit(secevent.Event{Kind: secevent.KindProtoASDUInvalid, Action: secevent.ActIgnored,
+				Detail: "ASDU in a peer user data frame could not be decoded", Raw: frame.ASDU})
 		}
 		return sf.sendSecFixed(SecFcConfACK, addr)
 
@@ -782,6 +793,11 @@ func (sf *Client) frameRecvLoop() {
 					errors.Is(err, ErrLengthMismatch) || errors.Is(err, ErrInvalidEndChar) ||
 					errors.Is(err, ErrFrameTooShort) || errors.Is(err, ErrFrameLenExceeded) {
 					sf.Warn("Frame parsing error: %v. Attempting to recover.", err)
+					if sf.cyberOn() {
+						e := sf.linkEvent(secevent.KindProtoCS101Frame, secevent.ActIgnored, "link frame rejected: "+err.Error(), nil)
+						e.Fields, e.Err = 0, err
+						sf.emit(e)
+					}
 					continue
 				}
 				// Other errors might be more severe

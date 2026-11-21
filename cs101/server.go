@@ -17,6 +17,7 @@ import (
 
 	"github.com/riclolsen/go-iecp5/asdu"
 	"github.com/riclolsen/go-iecp5/clog"
+	"github.com/riclolsen/go-iecp5/secevent"
 )
 
 // Server represents an IEC101 Secondary Station (Slave). In balanced mode it
@@ -60,6 +61,7 @@ type Server struct {
 	connStatus        uint32 // statusInitial, statusConnecting, etc.
 	reconnectInterval time.Duration
 	rwMux             sync.RWMutex
+	cyber             serverCyber
 	clog.Clog
 	wg         sync.WaitGroup
 	ctx        context.Context    // Controls the main run loop
@@ -88,6 +90,7 @@ func NewServer(handler ServerHandlerInterface) *Server {
 		Clog:              clog.NewLogger("cs101 server => "), // Placeholder address initially
 	}
 	srv.Clog.LogMode(true) // Enable logging by default
+	srv.cyber.init("iec101", "server")
 	return srv
 }
 
@@ -165,6 +168,7 @@ func (sf *Server) Start() error {
 func (sf *Server) run() {
 	sf.Debug("Server run loop started")
 	transporter := NewTransporter(sf.config.Transport, sf.config.Serial, sf.config.TCP)
+	transporter.SetBusyHandler(sf.reportBusy)
 	defer func() {
 		_ = transporter.Close()
 		sf.setConnectStatus(statusInitial)
@@ -220,6 +224,7 @@ func (sf *Server) serveConn(conn io.ReadWriteCloser) {
 	sf.primActive = false
 	sf.primRetry = 0
 	sf.primNextInit = time.Now()
+	sf.beginCyber()
 
 	// Drain channel leftovers from a previous connection
 drain:
@@ -277,6 +282,11 @@ func (sf *Server) frameRecvLoop() {
 					errors.Is(err, ErrLengthMismatch) || errors.Is(err, ErrInvalidEndChar) ||
 					errors.Is(err, ErrFrameTooShort) || errors.Is(err, ErrFrameLenExceeded) {
 					sf.Warn("Frame parsing error: %v. Attempting recovery.", err)
+					if sf.cyberOn() {
+						e := sf.linkEvent(secevent.KindProtoCS101Frame, secevent.ActIgnored, "link frame rejected: "+err.Error(), nil)
+						e.Fields, e.Err = 0, err
+						sf.emit(e)
+					}
 					continue
 				}
 				sf.Error("Error reading/parsing frame: %v", err)
@@ -383,6 +393,10 @@ func (sf *Server) handleIncomingFrame(frame *Frame) error {
 
 		if receivedAddr != expectedAddr && !isBroadcast {
 			// Silently ignore frames not addressed to this station
+			if sf.cyberOn() {
+				sf.emit(sf.linkEvent(secevent.KindLinkForeignAddress, secevent.ActIgnored,
+					fmt.Sprintf("frame for link address %d, this station is %d", receivedAddr, expectedAddr), frame))
+			}
 			return nil
 		}
 
@@ -401,6 +415,8 @@ func (sf *Server) handleIncomingFrame(frame *Frame) error {
 			default:
 				sf.Warn("Ignoring a broadcast frame requesting a reply (FC=%d): answering it would collide with every other station on the line.",
 					ctrl.Fun)
+				sf.emit(sf.linkEvent(secevent.KindLinkBroadcastReply, secevent.ActIgnored,
+					fmt.Sprintf("broadcast frame with function %d asks for a reply", ctrl.Fun), frame))
 			}
 			return nil
 		}
@@ -416,6 +432,7 @@ func (sf *Server) handleIncomingFrame(frame *Frame) error {
 			return nil
 		}
 		sf.Warn("Ignoring frame with PRM=0 (from secondary station?)")
+		sf.emit(sf.linkEvent(secevent.KindLinkWrongPRM, secevent.ActIgnored, "frame from a secondary station arrived at a secondary station", frame))
 		return nil
 	}
 
@@ -426,6 +443,8 @@ func (sf *Server) handleIncomingFrame(frame *Frame) error {
 	if ctrl.FCV {
 		if ctrl.FCB != sf.fcbExpected {
 			sf.Warn("Received FCV frame with unexpected FCB (Expected=%v): repeated frame, re-sending previous response.", sf.fcbExpected)
+			sf.emit(sf.linkEvent(secevent.KindSeqFCBRepeat, secevent.ActObserved,
+				fmt.Sprintf("FCB %v, expected %v: repeated or replayed frame", ctrl.FCB, sf.fcbExpected), frame))
 			if sf.lastResp != nil {
 				return sf.sendFrameToChan(sf.lastResp)
 			}
@@ -438,6 +457,7 @@ func (sf *Server) handleIncomingFrame(frame *Frame) error {
 	switch ctrl.Fun {
 	case PrimFcResetLink:
 		sf.Debug("Received Reset Link command")
+		sf.emit(sf.linkEvent(secevent.KindCtrlLinkReset, secevent.ActObserved, "the primary reset the link", frame))
 		atomic.StoreUint32(&sf.linkStatus, linkStateReset)
 		sf.fcbExpected = true // first FCV frame after reset carries FCB=1
 		sf.lastResp = nil
@@ -458,6 +478,7 @@ func (sf *Server) handleIncomingFrame(frame *Frame) error {
 		sf.Debug("Received Confirmed User Data from Primary (FCB=%v)", ctrl.FCB)
 		if !ctrl.FCV {
 			sf.Warn("Received Confirmed User Data frame with FCV=0. Ignoring.")
+			sf.emit(sf.linkEvent(secevent.KindProtoCS101FCV, secevent.ActIgnored, "confirmed user data with FCV=0", frame))
 			return nil
 		}
 		sf.dispatchASDU(frame)
@@ -487,6 +508,8 @@ func (sf *Server) handleIncomingFrame(frame *Frame) error {
 
 	default:
 		sf.Warn("Received unhandled frame function code from primary: %s", ctrl)
+		sf.emit(sf.linkEvent(secevent.KindProtoCS101Function, secevent.ActRejected,
+			fmt.Sprintf("link function %d is not supported", ctrl.Fun), frame))
 		// Respond: link service not implemented
 		return sf.sendResp(NewFixedFrame(sf.secControl(SecFcRespLinkNI, false), sf.buildLinkAddress()))
 	}
@@ -499,6 +522,13 @@ func (sf *Server) dispatchASDU(frame *Frame) {
 	tempASDU := asdu.NewEmptyASDU(&sf.params)
 	if err := tempASDU.UnmarshalBinary(frame.ASDU); err != nil {
 		sf.Warn("Failed to decode ASDU from user data frame: %v", err)
+		if sf.cyberOn() {
+			sf.emit(secevent.Event{Kind: secevent.KindProtoASDUInvalid, Action: secevent.ActIgnored,
+				Detail: "ASDU rejected by the decoder: " + err.Error(), Err: err, Raw: frame.ASDU})
+		}
+		return
+	}
+	if sf.cyber.insp != nil && sf.cyber.insp.Inspect(tempASDU, frame.ASDU) {
 		return
 	}
 	payload := handlerASDUPayload{

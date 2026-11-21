@@ -15,6 +15,7 @@ import (
 
 	"github.com/riclolsen/go-iecp5/clog"
 	"github.com/riclolsen/go-iecp5/cs101"
+	"github.com/riclolsen/go-iecp5/secevent"
 )
 
 // Connection states
@@ -78,6 +79,7 @@ type pendingSend struct {
 
 // Client is an IEC 60870-5-103 primary station (master).
 type Client struct {
+	cyber   clientCyber
 	option  ClientOption
 	port    io.ReadWriteCloser
 	handler ClientHandlerInterface
@@ -160,6 +162,7 @@ func NewClient(handler ClientHandlerInterface, o *ClientOption) *Client {
 		onDeviceActive:   func(*Client, byte) {},
 	}
 	c.Clog.LogMode(true)
+	c.cyber.em.Protocol, c.cyber.em.Role = "iec103", "client"
 	return c
 }
 
@@ -601,12 +604,15 @@ func (sf *Client) handleIncomingFrame(frame *cs101.Frame) error {
 	sec := sf.secs[receivedAddr]
 	if sec == nil {
 		sf.Warn("Ignoring frame with unexpected link address %d", receivedAddr)
+		sf.emit(sf.linkEvent(secevent.KindLinkUnexpectedAddr, secevent.ActIgnored,
+			fmt.Sprintf("frame from link address %d, which is not a station this client polls", receivedAddr), frame))
 		return nil
 	}
 
 	ctrl := frame.GetControlField()
 	if ctrl.PRM {
 		sf.Warn("Received unexpected frame with PRM=1 (103 is unbalanced): %s", ctrl)
+		sf.emit(sf.linkEvent(secevent.KindLinkWrongPRM, secevent.ActIgnored, "a station sent a primary frame on an unbalanced link", frame))
 		return nil
 	}
 	// Every secondary response carries DFC. Remember it against the station:
@@ -656,6 +662,8 @@ func (sf *Client) handleIncomingFrame(frame *cs101.Frame) error {
 			a := new(ASDU)
 			if err := a.UnmarshalBinary(frame.ASDU); err != nil {
 				sf.Warn("Failed to decode ASDU from variable frame: %v", err)
+				sf.emit(secevent.Event{Kind: secevent.KindProtoASDUInvalid, Action: secevent.ActIgnored,
+					Detail: "ASDU rejected by the decoder: " + err.Error(), Err: err, Raw: frame.ASDU})
 			} else {
 				sf.dispatchASDU(a)
 			}
@@ -712,6 +720,10 @@ func (sf *Client) frameRecvLoop() {
 					errors.Is(err, cs101.ErrLengthMismatch) || errors.Is(err, cs101.ErrInvalidEndChar) ||
 					errors.Is(err, cs101.ErrFrameTooShort) || errors.Is(err, cs101.ErrFrameLenExceeded) {
 					sf.Warn("Frame parsing error: %v. Attempting to recover.", err)
+					if sf.cyberOn() {
+						sf.emit(secevent.Event{Kind: secevent.KindProtoCS101Frame, Action: secevent.ActIgnored,
+							Detail: "link frame rejected: " + err.Error(), Err: err})
+					}
 					continue
 				}
 				sf.Error("Error reading/parsing frame: %v", err)
