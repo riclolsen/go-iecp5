@@ -83,6 +83,8 @@ type Client struct {
 	endMu     sync.Mutex
 	endReason string
 	guard     *secevent.Guard
+	pol       secevent.Policy
+	reqs      requestTracker
 }
 
 // NewClient returns an IEC104 master,default config and default asdu.ParamsWide params
@@ -530,8 +532,11 @@ func (sf *Client) handlerLoop() {
 			asduPack := asdu.NewEmptyASDU(&sf.option.params)
 			if err := asduPack.UnmarshalBinary(rawAsdu); err != nil {
 				sf.Warn("asdu UnmarshalBinary failed,%+v", err)
+				sf.emit(secevent.Event{Kind: secevent.KindProtoASDUInvalid, Action: secevent.ActIgnored,
+					Detail: "ASDU rejected by the decoder: " + err.Error(), Err: err, Raw: rawAsdu})
 				continue
 			}
+			sf.inspect(asduPack, rawAsdu)
 			if err := sf.clientHandler(asduPack); err != nil {
 				sf.Warn("Falied handling I frame, error: %v", err)
 			}
@@ -682,6 +687,9 @@ func (sf *Client) Send(a *asdu.ASDU) error {
 	case sf.sendASDU <- data:
 	default:
 		return ErrBufferFulled
+	}
+	if sf.cyberOn() {
+		sf.trackRequest(a)
 	}
 	return nil
 }

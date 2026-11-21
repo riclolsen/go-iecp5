@@ -361,7 +361,7 @@ func TestCommandFloodThrottled(t *testing.T) {
 
 func TestKeepAliveStormAndFrameFlood(t *testing.T) {
 	c, addr := policyWithHandler(t, &secHandler{}, secevent.Policy{
-		Limits: secevent.Limits{TestFR: secevent.Rate{N: 5, Per: time.Minute}, Frames: secevent.Rate{N: 100, Per: time.Minute}},
+		Limits:      secevent.Limits{TestFR: secevent.Rate{N: 5, Per: time.Minute}, Frames: secevent.Rate{N: 100, Per: time.Minute}},
 		FloodAction: secevent.ActDisconnected})
 	conn := dialRetry(t, addr)
 	defer conn.Close()

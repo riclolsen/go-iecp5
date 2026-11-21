@@ -18,7 +18,7 @@ import (
 
 	"github.com/riclolsen/go-iecp5/asdu"
 	"github.com/riclolsen/go-iecp5/clog"
-	"github.com/riclolsen/go-iecp5/internal/secmon"
+	"github.com/riclolsen/go-iecp5/internal/secasdu"
 	"github.com/riclolsen/go-iecp5/secevent"
 )
 
@@ -75,9 +75,8 @@ type SrvSession struct {
 	endReason string
 	guard     *secevent.Guard
 	pol       secevent.Policy
-	bk        *buckets
-	scan      *secmon.Scan
-	rejects   *secmon.Bucket
+	fl        *secasdu.FrameLimits
+	insp      *secasdu.Inspector
 	// admission result handed over by the Server, consumed by beginCyber
 	presetID   uint64
 	presetPeer *secevent.PeerInfo
@@ -321,7 +320,7 @@ func (sf *SrvSession) run(ctx context.Context) {
 
 		case apdu := <-sf.rcvRaw:
 			idleTimeout3Sine = time.Now() // Every time an i frame, S frame, U frame is received, the idle timer is reset, t3
-			if sf.bk != nil && sf.frameFlood(sf.bk.frames, secevent.KindFloodFrames, "inbound frame rate") {
+			if sf.fl != nil && sf.frameFlood(sf.fl.Frames, secevent.KindFloodFrames, "inbound frame rate") {
 				return
 			}
 			apci, asduVal, err := parse(apdu)
@@ -339,8 +338,8 @@ func (sf *SrvSession) run(ctx context.Context) {
 			switch head := apci.(type) {
 			case sAPCI:
 				sf.Debug("RX sFrame %v", head)
-				if sf.bk != nil && head.rcvSN == sf.ackNoSend &&
-					sf.frameFlood(sf.bk.sframes, secevent.KindFloodSFrames, "rate of S-frames that acknowledge nothing new") {
+				if sf.fl != nil && head.rcvSN == sf.ackNoSend &&
+					sf.frameFlood(sf.fl.SFrames, secevent.KindFloodSFrames, "rate of S-frames that acknowledge nothing new") {
 					return
 				}
 				if !sf.updateAckNoOut(head.rcvSN) {
@@ -398,7 +397,7 @@ func (sf *SrvSession) run(ctx context.Context) {
 				sf.Debug("RX uFrame %v", head)
 				switch head.function {
 				case uStartDtActive:
-					if sf.bk != nil && sf.frameFlood(sf.bk.utoggle, secevent.KindFloodUToggle, "STARTDT/STOPDT rate") {
+					if sf.fl != nil && sf.frameFlood(sf.fl.UToggle, secevent.KindFloodUToggle, "STARTDT/STOPDT rate") {
 						return
 					}
 					sf.emit(secevent.Event{Kind: secevent.KindCtrlStartDT, Detail: "STARTDT act received"})
@@ -414,7 +413,7 @@ func (sf *SrvSession) run(ctx context.Context) {
 				// 	isActive = true
 				// 	startDtActiveSendSince = willNotTimeout
 				case uStopDtActive:
-					if sf.bk != nil && sf.frameFlood(sf.bk.utoggle, secevent.KindFloodUToggle, "STARTDT/STOPDT rate") {
+					if sf.fl != nil && sf.frameFlood(sf.fl.UToggle, secevent.KindFloodUToggle, "STARTDT/STOPDT rate") {
 						return
 					}
 					sf.emit(secevent.Event{Kind: secevent.KindCtrlStopDT, Detail: "STOPDT act received"})
@@ -447,7 +446,7 @@ func (sf *SrvSession) run(ctx context.Context) {
 				// 	isActive = false
 				// 	stopDtActiveSendSince = willNotTimeout
 				case uTestFrActive:
-					if sf.bk != nil && sf.frameFlood(sf.bk.testfr, secevent.KindFloodTestFR, "TESTFR act rate (keep-alive storm)") {
+					if sf.fl != nil && sf.frameFlood(sf.fl.TestFR, secevent.KindFloodTestFR, "TESTFR act rate (keep-alive storm)") {
 						return
 					}
 					sendUFrame(uTestFrConfirm)

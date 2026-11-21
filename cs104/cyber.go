@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/riclolsen/go-iecp5/internal/secasdu"
 	"github.com/riclolsen/go-iecp5/internal/secmon"
 	"github.com/riclolsen/go-iecp5/secevent"
 )
@@ -254,9 +255,8 @@ func (sf *SrvSession) beginCyber() {
 	sf.endMu.Unlock()
 	if sf.guard != nil {
 		sf.pol = sf.guard.Policy()
-		sf.bk = newBuckets(sf.pol.Limits)
-		sf.scan = secmon.NewScan(sf.pol.ScanThreshold, sf.pol.ScanWindow)
-		sf.rejects = nil
+		sf.fl = secasdu.NewFrameLimits(sf.pol.Limits)
+		sf.insp = secasdu.New(srvHost{sf}, sf.guard, sf.pol)
 	}
 	p := peerInfoFromConn(sf.conn)
 	if sf.presetPeer != nil {
@@ -301,6 +301,9 @@ func (sf *SrvSession) endCyber() {
 }
 
 func (sf *Client) beginCyber() {
+	if sf.guard != nil {
+		sf.pol = sf.guard.Policy()
+	}
 	sf.sessionID.Store(secevent.NextSessionID())
 	sf.started = time.Now()
 	sf.framesIn.Store(0)
