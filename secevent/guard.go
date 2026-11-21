@@ -34,9 +34,13 @@ type Guard struct {
 	dup   map[string]time.Time
 }
 
-// NewGuard creates a Guard that raises its events through em.
+// NewGuard creates a Guard that raises its events through em; a nil em
+// raises none.
 func NewGuard(p Policy, em *Emitter) *Guard {
 	p.defaults()
+	if em == nil {
+		em = &Emitter{}
+	}
 	return &Guard{
 		p: p, em: em,
 		dup:    map[string]time.Time{},
@@ -112,7 +116,19 @@ func (g *Guard) Admit(peer PeerInfo, id uint64) (PeerInfo, bool) {
 	case g.p.MaxSessionsPerIP > 0 && g.perIP[ip] >= g.p.MaxSessionsPerIP:
 		limit = fmt.Sprintf("MaxSessionsPerIP (%d) reached for this source address", g.p.MaxSessionsPerIP)
 	}
+	// Take the slot now, in the same critical section as the check: the
+	// identity lookup below can take a while, and every connection racing
+	// through it would otherwise see the same free count.
+	if limit == "" {
+		g.total++
+		g.perIP[ip]++
+	}
 	g.mu.Unlock()
+	orig := peer
+	reject := func() (PeerInfo, bool) {
+		g.Release(orig)
+		return peer, false
+	}
 
 	if over != "" {
 		drop := g.p.FloodAction == ActThrottled || g.p.FloodAction == ActDisconnected
@@ -122,6 +138,9 @@ func (g *Guard) Admit(peer PeerInfo, id uint64) (PeerInfo, bool) {
 		}
 		g.emit(KindConnRate, peer, id, act, over, nil)
 		if drop {
+			if limit == "" {
+				return reject()
+			}
 			return peer, false
 		}
 	}
@@ -148,15 +167,11 @@ func (g *Guard) Admit(peer PeerInfo, id uint64) (PeerInfo, bool) {
 			g.emit(KindConnUnexpectedMAC, peer, id, act, why, nil)
 			g.emit(KindPeerMACPinning, peer, id, act, why, nil)
 			if g.p.RejectBindingMismatch {
-				return peer, false
+				return reject()
 			}
 		}
 	}
 
-	g.mu.Lock()
-	g.total++
-	g.perIP[ip]++
-	g.mu.Unlock()
 	return peer, true
 }
 

@@ -204,3 +204,19 @@ func (sf *Client) linkEvent(kind secevent.Kind, act secevent.Action, detail stri
 	}
 	return e
 }
+
+// busyEvent describes a TCP connection turned away because another is being
+// served: a second master, or someone probing the port.
+func busyEvent(a net.Addr) secevent.Event {
+	e := secevent.Event{Kind: secevent.KindConnRejectedBusy, Action: secevent.ActRejected,
+		Detail: "connection refused: another connection is being served"}
+	e.Peer.Network = "tcp"
+	if ap, err := netip.ParseAddrPort(addrOf(a)); err == nil {
+		e.Peer.RemoteAddr = ap
+	}
+	return e
+}
+
+func (sf *Server) reportBusy(a net.Addr) { sf.emit(busyEvent(a)) }
+
+func (sf *Client) reportBusy(a net.Addr) { sf.emit(busyEvent(a)) }

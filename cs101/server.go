@@ -168,6 +168,7 @@ func (sf *Server) Start() error {
 func (sf *Server) run() {
 	sf.Debug("Server run loop started")
 	transporter := NewTransporter(sf.config.Transport, sf.config.Serial, sf.config.TCP)
+	transporter.SetBusyHandler(sf.reportBusy)
 	defer func() {
 		_ = transporter.Close()
 		sf.setConnectStatus(statusInitial)

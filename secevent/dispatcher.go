@@ -73,7 +73,10 @@ type Dispatcher struct {
 	wg   sync.WaitGroup
 
 	closeOnce sync.Once
-	closed    atomic.Bool
+	// gate orders Emit against Close: an Emit holding the read side has
+	// either queued its event before Close's final drain or sees closed.
+	gate   sync.RWMutex
+	closed bool
 
 	emitted, delivered, dropped, aggregated atomic.Uint64
 	pendingDrop                             atomic.Uint64
@@ -108,7 +111,9 @@ func (d *Dispatcher) MaxRaw() int { return d.opt.MaxRaw }
 // Emit queues e without blocking. It reports false when the event was
 // dropped because the queue is full or the Dispatcher is closed.
 func (d *Dispatcher) Emit(e Event) bool {
-	if d.closed.Load() {
+	d.gate.RLock()
+	defer d.gate.RUnlock()
+	if d.closed {
 		return false
 	}
 	d.emitted.Add(1)
@@ -148,7 +153,9 @@ func (d *Dispatcher) Stats() Stats {
 // waits for the sink goroutine to finish.
 func (d *Dispatcher) Close() {
 	d.closeOnce.Do(func() {
-		d.closed.Store(true)
+		d.gate.Lock()
+		d.closed = true
+		d.gate.Unlock()
 		close(d.done)
 	})
 	d.wg.Wait()

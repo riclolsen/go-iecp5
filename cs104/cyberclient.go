@@ -60,27 +60,48 @@ func (rt *requestTracker) add(k reqKey, now time.Time) {
 	rt.m[k] = &reqState{sent: now}
 }
 
+// lookup finds the request an answer for k belongs to: the request to that
+// station, or one sent to the global address, which every station answers
+// with its own common address. The caller holds the lock.
+func (rt *requestTracker) lookup(k reqKey) (reqKey, *reqState) {
+	if s := rt.m[k]; s != nil {
+		return k, s
+	}
+	g := k
+	g.ca = asdu.GlobalCommonAddr
+	return g, rt.m[g]
+}
+
 // live reports whether k is outstanding, or finished so recently that its
 // last frames may still be arriving.
 func (rt *requestTracker) live(k reqKey, now time.Time) bool {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
-	s := rt.m[k]
+	kk, s := rt.lookup(k)
 	if s == nil {
 		return false
 	}
 	if now.Sub(s.sent) > requestTrackTTL || (!s.doneAt.IsZero() && now.Sub(s.doneAt) > requestTrackGrace) {
-		delete(rt.m, k)
+		delete(rt.m, kk)
 		return false
 	}
 	return true
 }
 
+// done marks k answered. A broadcast request stays live until it expires:
+// one station terminating it says nothing about when the others will.
 func (rt *requestTracker) done(k reqKey, now time.Time) {
 	rt.mu.Lock()
-	if s := rt.m[k]; s != nil {
+	if kk, s := rt.lookup(k); s != nil && kk.ca != asdu.GlobalCommonAddr {
 		s.doneAt = now
 	}
+	rt.mu.Unlock()
+}
+
+// forget drops k, for a request that was never sent.
+func (rt *requestTracker) forget(k reqKey) {
+	rt.mu.Lock()
+	delete(rt.m, k)
 	rt.mu.Unlock()
 }
 
@@ -101,13 +122,16 @@ func (rt *requestTracker) anyForCA(typ asdu.TypeID, ca asdu.CommonAddr, now time
 	return false
 }
 
-// trackRequest records an outgoing request.
-func (sf *Client) trackRequest(a *asdu.ASDU) {
+// trackRequest records an outgoing request. It must run before the request
+// is queued: the answer can arrive before Send returns.
+func (sf *Client) trackRequest(a *asdu.ASDU) (reqKey, bool) {
 	if !asdu.IsControlDirection(a.Type) {
-		return
+		return reqKey{}, false
 	}
 	ioa, _ := asdu.FirstIOA(a)
-	sf.reqs.add(reqKey{a.Type, a.CommonAddr, ioa}, time.Now())
+	k := reqKey{a.Type, a.CommonAddr, ioa}
+	sf.reqs.add(k, time.Now())
+	return k, true
 }
 
 // inspect examines an ASDU received from the server before the handler sees

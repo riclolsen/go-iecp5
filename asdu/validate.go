@@ -75,7 +75,9 @@ func ValidateRequest(a *ASDU) error {
 			return fmt.Errorf("%w: interrogation qualifier %d", ErrQualifierReserved, q)
 		}
 	case C_CI_NA_1:
-		if q, ok := at(0); ok && q&0x3f > 5 {
+		// RQT: 0 requests no counter, 1..5 are the standard groups, 6..31
+		// are reserved for the standard, 32..63 are private.
+		if q, ok := at(0); ok && (q&0x3f == 0 || (q&0x3f > 5 && q&0x3f < 32)) {
 			return fmt.Errorf("%w: counter interrogation request %d", ErrQualifierReserved, q&0x3f)
 		}
 	case C_RP_NA_1:

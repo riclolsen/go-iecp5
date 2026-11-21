@@ -217,6 +217,14 @@ func DefaultPolicy() Policy {
 	}
 }
 
+// WithDefaults returns p with every unset threshold, limit and helper filled in
+// with the library's default. A Guard applies it itself; code that inspects
+// traffic without a Guard must apply it before use.
+func (p Policy) WithDefaults() Policy {
+	p.defaults()
+	return p
+}
+
 func (p *Policy) defaults() {
 	if p.MACLookupTimeout <= 0 {
 		p.MACLookupTimeout = 200 * time.Millisecond

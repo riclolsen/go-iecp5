@@ -212,6 +212,7 @@ func (sf *Client) Start() error {
 func (sf *Client) connectionManager() {
 	sf.Debug("Connection manager started")
 	transporter := NewTransporter(sf.option.config.Transport, sf.option.config.Serial, sf.option.config.TCP)
+	transporter.SetBusyHandler(sf.reportBusy)
 	defer func() {
 		_ = transporter.Close()
 		sf.setConnectStatus(statusInitial)

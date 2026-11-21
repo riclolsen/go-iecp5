@@ -98,3 +98,28 @@ func TestClientSolicitedAnswersAreNotUnsolicited(t *testing.T) {
 		}
 	}
 }
+
+// A request to the global address is answered by each station with its own
+// common address; those answers are solicited.
+func TestRequestTrackerBroadcast(t *testing.T) {
+	var rt requestTracker
+	now := time.Now()
+	rt.add(reqKey{asdu.C_IC_NA_1, asdu.GlobalCommonAddr, 0}, now)
+	for _, ca := range []asdu.CommonAddr{1, 7} {
+		k := reqKey{asdu.C_IC_NA_1, ca, 0}
+		if !rt.live(k, now) {
+			t.Fatalf("answer from station %d to a broadcast taken as unsolicited", ca)
+		}
+		rt.done(k, now)
+	}
+	// One station terminating must not end the broadcast for the others.
+	if !rt.live(reqKey{asdu.C_IC_NA_1, 9, 0}, now.Add(requestTrackGrace+time.Second)) {
+		t.Error("broadcast ended by the first station's termination")
+	}
+	if rt.live(reqKey{asdu.C_CS_NA_1, 1, 0}, now) {
+		t.Error("an answer of another type matched the broadcast")
+	}
+	if rt.live(reqKey{asdu.C_IC_NA_1, 1, 0}, now.Add(requestTrackTTL+time.Second)) {
+		t.Error("expired broadcast still live")
+	}
+}

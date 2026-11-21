@@ -2,6 +2,7 @@ package cs101
 
 import (
 	"context"
+	"net"
 	"sync"
 	"testing"
 	"time"
@@ -141,4 +142,17 @@ func TestClientLinkEvents(t *testing.T) {
 		t.Fatal(err)
 	}
 	c.wait(t, secevent.KindProtoCS101Frame)
+}
+
+func TestBusyConnectionIsReported(t *testing.T) {
+	c := &collector{}
+	srv := NewServer(&srvHandler{})
+	srv.SetLogMode(false)
+	srv.SetCyberEventSink(c)
+	defer srv.cyber.em.Close()
+	srv.reportBusy(&net.TCPAddr{IP: net.IPv4(192, 0, 2, 9), Port: 4000})
+	e := c.wait(t, secevent.KindConnRejectedBusy)
+	if e.Peer.RemoteAddr.String() != "192.0.2.9:4000" {
+		t.Errorf("peer %v", e.Peer.RemoteAddr)
+	}
 }

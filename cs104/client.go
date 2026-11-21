@@ -683,13 +683,18 @@ func (sf *Client) Send(a *asdu.ASDU) error {
 	if err != nil {
 		return err
 	}
+	var key reqKey
+	tracked := false
+	if sf.cyberOn() {
+		key, tracked = sf.trackRequest(a)
+	}
 	select {
 	case sf.sendASDU <- data:
 	default:
+		if tracked {
+			sf.reqs.forget(key)
+		}
 		return ErrBufferFulled
-	}
-	if sf.cyberOn() {
-		sf.trackRequest(a)
 	}
 	return nil
 }

@@ -113,7 +113,6 @@ const (
 	KindSeqNsBehind    Kind = "seq.ns_behind"
 	KindSeqNrAhead     Kind = "seq.nr_ahead"
 	KindSeqNrRegressed Kind = "seq.nr_regressed"
-	KindSeqPeerK       Kind = "seq.peer_k_exceeded"
 	KindSeqFCBRepeat   Kind = "seq.fcb_repeat"
 )
 
@@ -278,7 +277,6 @@ var kinds = map[Kind]KindInfo{
 	KindSeqNsBehind:    {CatSequence, SevAlert, tMITM, true},
 	KindSeqNrAhead:     {CatSequence, SevAlert, tMITM, true},
 	KindSeqNrRegressed: {CatSequence, SevWarning, tMITM, true},
-	KindSeqPeerK:       {CatSequence, SevWarning, tDoS, false},
 	KindSeqFCBRepeat:   {CatSequence, SevNotice, "", false},
 
 	KindUnsolUConfirm:     {CatUnsolicited, SevWarning, tSpoofRpt, false},

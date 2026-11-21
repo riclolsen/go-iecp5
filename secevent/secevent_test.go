@@ -2,13 +2,17 @@ package secevent
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"net/netip"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/riclolsen/go-iecp5/asdu"
+	"github.com/riclolsen/go-iecp5/netpeer"
 )
 
 type collector struct {
@@ -185,5 +189,63 @@ func TestFilterAndMultiSink(t *testing.T) {
 	s.Handle(Event{Severity: SevAlert, Category: CatSequence})
 	if len(a.all()) != 3 || len(b.all()) != 1 {
 		t.Errorf("a=%d b=%d", len(a.all()), len(b.all()))
+	}
+}
+
+// Concurrent connections must not slip past MaxSessions while one of them is
+// still being identified.
+func TestAdmitHonoursMaxSessionsUnderConcurrency(t *testing.T) {
+	p := DefaultPolicy()
+	p.MaxSessions = 1
+	p.AcceptRate, p.GlobalAcceptRate = Rate{}, Rate{1000, time.Second}
+	p.Resolver = netpeer.ResolverFunc(func(context.Context, netip.Addr) (netpeer.Result, error) {
+		time.Sleep(50 * time.Millisecond)
+		return netpeer.Result{}, netpeer.ErrNotFound
+	})
+	g := NewGuard(p, nil)
+	var wg sync.WaitGroup
+	var admitted atomic.Int32
+	for i := range 20 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			peer := PeerInfo{Network: "tcp", RemoteAddr: netip.AddrPortFrom(netip.MustParseAddr("192.0.2.1"), uint16(1000+i))}
+			if _, ok := g.Admit(peer, uint64(i)); ok {
+				admitted.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+	if n := admitted.Load(); n != 1 {
+		t.Fatalf("%d sessions admitted with MaxSessions=1", n)
+	}
+	if n := g.Sessions(); n != 1 {
+		t.Fatalf("%d slots held, want 1", n)
+	}
+}
+
+// Every event Emit accepts is delivered, even when Close races with it.
+func TestEmitRacingCloseLosesNothing(t *testing.T) {
+	for range 50 {
+		var got atomic.Uint64
+		d := NewDispatcher(SinkFunc(func(Event) { got.Add(1) }), Options{QueueSize: 4096, AggregateWindow: -1})
+		var accepted atomic.Uint64
+		var wg sync.WaitGroup
+		for g := range 4 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for i := range 200 {
+					if d.Emit(Event{Kind: KindConnClosed, SessionID: uint64(g*1000 + i)}) {
+						accepted.Add(1)
+					}
+				}
+			}()
+		}
+		d.Close()
+		wg.Wait()
+		if got.Load() != accepted.Load() {
+			t.Fatalf("%d events accepted, %d delivered", accepted.Load(), got.Load())
+		}
 	}
 }

@@ -383,11 +383,10 @@ func (sf *SrvSession) run(ctx context.Context) {
 				}
 
 				sf.seqNoRcv = (sf.seqNoRcv + 1) & 32767
-				if seqNoCount(sf.ackNoRcv, sf.seqNoRcv) > sf.config.SendUnAckLimitK {
-					sf.emit(secevent.Event{Kind: secevent.KindSeqPeerK, Action: secevent.ActObserved,
-						Detail: fmt.Sprintf("the peer has sent %d I-frames without an acknowledgement, more than k=%d",
-							seqNoCount(sf.ackNoRcv, sf.seqNoRcv), sf.config.SendUnAckLimitK)})
-				}
+				// No check of the peer's k here: we acknowledge every w
+				// frames, so from this side the count never passes w, and
+				// with acknowledgements in flight a peer overrunning k
+				// cannot be told apart from one that is not.
 				if seqNoCount(sf.ackNoRcv, sf.seqNoRcv) >= sf.config.RecvUnAckLimitW {
 					sendSFrame(sf.seqNoRcv)
 					sf.ackNoRcv = sf.seqNoRcv

@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"sync"
 	"time"
 
 	"github.com/riclolsen/go-iecp5/asdu"
@@ -48,9 +49,11 @@ func NewFrameLimits(l secevent.Limits) *FrameLimits {
 	return &FrameLimits{TestFR: b(l.TestFR), UToggle: b(l.UToggle), SFrames: b(l.SFrames), Frames: b(l.Frames)}
 }
 
-// Inspector examines the ASDUs of one session. It belongs to the goroutine
-// that handles that session's ASDUs.
+// Inspector examines the ASDUs of one session. Inspect runs on the goroutine
+// that handles the session's requests, ObserveOutbound on whichever goroutine
+// sends a reply, so the detector state is guarded by mu.
 type Inspector struct {
+	mu      sync.Mutex
 	host    Host
 	pol     secevent.Policy
 	guard   *secevent.Guard
@@ -61,6 +64,7 @@ type Inspector struct {
 
 // New creates the inspector of a session. guard may be nil.
 func New(h Host, g *secevent.Guard, pol secevent.Policy) *Inspector {
+	pol = pol.WithDefaults() // a nil guard means nobody else filled them in
 	b := func(r secevent.Rate) *secmon.Bucket { return secmon.NewBucket(r.N, r.Per, 0) }
 	l := pol.Limits
 	return &Inspector{
@@ -154,6 +158,8 @@ func (in *Inspector) Inspect(a *asdu.ASDU, raw []byte) (block bool) {
 	if !in.host.Enabled() {
 		return false
 	}
+	in.mu.Lock()
+	defer in.mu.Unlock()
 	t := a.Type
 	ev := func(kind secevent.Kind, act secevent.Action, detail string, err error) {
 		e := Event(kind, a, act, detail)
@@ -363,6 +369,8 @@ func (in *Inspector) ObserveOutbound(u *asdu.ASDU) {
 	if !in.host.Enabled() {
 		return
 	}
+	in.mu.Lock()
+	defer in.mu.Unlock()
 	switch u.Coa.Cause {
 	case asdu.UnknownTypeID:
 		in.host.Emit(Event(secevent.KindAccessUnknownType, u, secevent.ActRejected, "request for an unknown type or function refused"))
