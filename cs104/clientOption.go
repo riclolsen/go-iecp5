@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/riclolsen/go-iecp5/asdu"
+	"github.com/riclolsen/go-iecp5/secevent"
 )
 
 // ClientOption client configuration
@@ -21,6 +22,7 @@ type ClientOption struct {
 	autoReconnect     bool          // Whether to start reconnection
 	reconnectInterval time.Duration // reconnection interval
 	TLSConfig         *tls.Config   // tls configuration
+	policy            *secevent.Policy
 }
 
 // NewOption with default config and default asdu.ParamsWide params
@@ -31,6 +33,7 @@ func NewOption() *ClientOption {
 		nil,
 		true,
 		DefaultReconnectInterval,
+		nil,
 		nil,
 	}
 }

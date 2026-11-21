@@ -41,6 +41,8 @@ type Server struct {
 	configErr error
 	// cyber delivers security events; see SetCyberEventSink.
 	cyber secevent.Emitter
+	// guard applies the security policy; nil until SetSecurityPolicy.
+	guard *secevent.Guard
 }
 
 // NewServer new a server, default config and default asdu.ParamsWide params
@@ -107,6 +109,11 @@ func (sf *Server) ListenAndServer(addr string) error {
 
 // serve accepts connections from listen until it is closed.
 func (sf *Server) serve(listen net.Listener) error {
+	if sf.guard == nil {
+		// Without a policy the peer is still identified, MAC included, and
+		// changes are still noticed; nothing is limited or refused.
+		sf.guard = secevent.NewGuard(secevent.Policy{}, &sf.cyber)
+	}
 	sf.mux.Lock()
 	sf.listen = listen
 	sf.mux.Unlock()
@@ -151,6 +158,23 @@ func (sf *Server) serve(listen net.Listener) error {
 
 		sf.wg.Add(1)
 		go func() {
+			defer sf.wg.Done()
+			id := secevent.NextSessionID()
+			peer := peerInfoFromConn(conn)
+			g := sf.guard
+
+			// Admission comes first and costs nothing: a peer that is not
+			// expected, or is over a limit, is closed before the TLS
+			// handshake or a single byte is read.
+			if g != nil {
+				var ok bool
+				if peer, ok = g.Admit(peer, id); !ok {
+					_ = conn.Close()
+					return
+				}
+				defer g.Release(peer)
+			}
+
 			// The TLS handshake is done here, bounded by t₀, rather than
 			// lazily inside the first read: a failed or stalled handshake is
 			// then seen for what it is and cannot hold a session slot.
@@ -158,11 +182,15 @@ func (sf *Server) serve(listen net.Listener) error {
 				_ = tc.SetDeadline(time.Now().Add(sf.config.ConnectTimeout0))
 				if err := tc.HandshakeContext(ctx); err != nil {
 					sf.Warn("TLS handshake with %v failed: %v", conn.RemoteAddr(), err)
+					sf.reportTLSError(err, peer, id)
 					_ = conn.Close()
-					sf.wg.Done()
 					return
 				}
 				_ = tc.SetDeadline(time.Time{})
+				peer.TLS = tlsPeerInfo(tc.ConnectionState())
+				if g != nil {
+					g.ObserveTLS(peer, id)
+				}
 			}
 			sess := &SrvSession{
 				config:   &sf.config,
@@ -180,6 +208,9 @@ func (sf *Server) serve(listen net.Listener) error {
 				serverNumber:   sf.serverNumber,
 				cyber:          &sf.cyber,
 				inbound:        true,
+				guard:          g,
+				presetID:       id,
+				presetPeer:     &peer,
 			}
 			sf.mux.Lock()
 			sf.sessions[sess] = struct{}{}
@@ -188,7 +219,6 @@ func (sf *Server) serve(listen net.Listener) error {
 			sf.mux.Lock()
 			delete(sf.sessions, sess)
 			sf.mux.Unlock()
-			sf.wg.Done()
 		}()
 	}
 }

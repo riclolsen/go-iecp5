@@ -72,6 +72,10 @@ type SrvSession struct {
 	framesOut atomic.Uint64
 	endMu     sync.Mutex
 	endReason string
+	guard     *secevent.Guard
+	// admission result handed over by the Server, consumed by beginCyber
+	presetID   uint64
+	presetPeer *secevent.PeerInfo
 }
 
 // RecvLoop feeds t.rcvRaw.
@@ -169,6 +173,12 @@ func (sf *SrvSession) run(ctx context.Context) {
 	// for the I-frames already sent to be acknowledged.
 	var pendingStopDt = false
 	var checkTicker = time.NewTicker(timeoutResolution)
+	var everActive = false
+	var inactiveLimit time.Duration
+	if sf.guard != nil {
+		inactiveLimit = sf.guard.Policy().InactiveTimeout
+	}
+	var connectedAt = time.Now()
 
 	// transmission timestamps for timeout calculation
 	var willNotTimeout = time.Now().Add(time.Hour * 24 * 365 * 100)
@@ -262,6 +272,13 @@ func (sf *SrvSession) run(ctx context.Context) {
 					Detail: "TESTFR act was not confirmed within t₁"})
 				return
 			}
+			if inactiveLimit > 0 && !everActive && now.Sub(connectedAt) >= inactiveLimit {
+				sf.Error("session never started data transfer, closing")
+				sf.noteEnd("STARTDT never received")
+				sf.emit(secevent.Event{Kind: secevent.KindConnNeverStarted, Action: secevent.ActDisconnected,
+					Detail: fmt.Sprintf("no STARTDT within %v of connecting", inactiveLimit)})
+				return
+			}
 			// check oldest unacknowledged outbound
 			if sf.ackNoSend != sf.seqNoSend &&
 				//now.Sub(sf.peek()) >= sf.SendUnAckTimeout1 {
@@ -350,6 +367,7 @@ func (sf *SrvSession) run(ctx context.Context) {
 				case uStartDtActive:
 					sendUFrame(uStartDtConfirm)
 					isActive = true
+					everActive = true
 					// A new STARTDT supersedes a STOPDT still waiting for its
 					// acknowledgements. Left set, the next acknowledgement
 					// would emit a STOPDT con on a session the controlling

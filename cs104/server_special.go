@@ -59,6 +59,7 @@ func NewServerSpecial(handler ServerHandlerInterface, o *ClientOption) ServerSpe
 	}
 	sf.cyber.Protocol, sf.cyber.Role = "iec104", "server-special"
 	sf.SrvSession.cyber = &sf.cyber
+	sf.SrvSession.guard = guardFor(o.policy, &sf.cyber)
 	return sf
 }
 
@@ -109,6 +110,7 @@ func (sf *serverSpec) running() {
 			sf.emit(secevent.Event{Kind: secevent.KindConnDialFailed, Err: err,
 				Peer:   secevent.PeerInfo{Network: "tcp"},
 				Detail: fmt.Sprintf("could not connect to %v", sf.option.server)})
+			reportDialError(sf.emit, err)
 			if !sf.option.autoReconnect {
 				return
 			}

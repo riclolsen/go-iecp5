@@ -82,6 +82,7 @@ type Client struct {
 	framesOut atomic.Uint64
 	endMu     sync.Mutex
 	endReason string
+	guard     *secevent.Guard
 }
 
 // NewClient returns an IEC104 master,default config and default asdu.ParamsWide params
@@ -101,6 +102,7 @@ func NewClient(handler ClientHandlerInterface, o *ClientOption) *Client {
 		onDeactivated:    func(*Client) {},
 	}
 	c.cyber.Protocol, c.cyber.Role = "iec104", "client"
+	c.guard = guardFor(o.policy, &c.cyber)
 	return c
 }
 
@@ -184,6 +186,7 @@ func (sf *Client) running() {
 			sf.emit(secevent.Event{Kind: secevent.KindConnDialFailed, Err: err,
 				Peer:   secevent.PeerInfo{Network: "tcp"},
 				Detail: fmt.Sprintf("could not connect to %v", sf.option.server)})
+			reportDialError(sf.emit, err)
 			sf.onConnectTimeout(sf)
 			if !sf.option.autoReconnect {
 				return

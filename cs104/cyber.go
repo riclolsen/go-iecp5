@@ -8,9 +8,12 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/riclolsen/go-iecp5/secevent"
@@ -30,7 +33,10 @@ func peerInfoFromConn(conn net.Conn) secevent.PeerInfo {
 		p.LocalAddr = netip.AddrPortFrom(a.Addr().Unmap(), a.Port())
 	}
 	if tc, ok := conn.(*tls.Conn); ok {
-		p.TLS = tlsPeerInfo(tc.ConnectionState())
+		// Before the handshake completes there is nothing to describe.
+		if cs := tc.ConnectionState(); cs.HandshakeComplete {
+			p.TLS = tlsPeerInfo(cs)
+		}
 	}
 	return p
 }
@@ -246,9 +252,27 @@ func (sf *SrvSession) beginCyber() {
 	sf.endReason = ""
 	sf.endMu.Unlock()
 	p := peerInfoFromConn(sf.conn)
+	if sf.presetPeer != nil {
+		// Admission already identified the peer, MAC address included.
+		p, sf.presetPeer = *sf.presetPeer, nil
+	}
+	if sf.presetID != 0 {
+		sf.sessionID.Store(sf.presetID)
+		sf.presetID = 0
+	}
+	if sf.guard != nil && !sf.inbound {
+		// A connection we dialled: learn who answered.
+		p = sf.guard.Identify(p, sf.sessionID.Load())
+		sf.guard.ObserveTLS(p, sf.sessionID.Load())
+	}
 	sf.peerMu.Lock()
 	sf.peer = p
 	sf.peerMu.Unlock()
+	if sf.guard != nil && sf.guard.Policy().MACRecheckInterval > 0 {
+		sf.guard.WatchMAC(sf.ctx, sf.sessionID.Load(), sf.PeerInfo,
+			func(np secevent.PeerInfo) { sf.peerMu.Lock(); sf.peer = np; sf.peerMu.Unlock() },
+			func() { sf.noteEnd("the peer's MAC address changed during the session"); sf.cancel() })
+	}
 	if sf.inbound && sf.cyberOn() {
 		sf.emit(secevent.Event{Kind: secevent.KindConnAccepted, Peer: p,
 			Detail: "connection accepted on the listener"})
@@ -278,9 +302,18 @@ func (sf *Client) beginCyber() {
 	sf.endReason = ""
 	sf.endMu.Unlock()
 	p := peerInfoFromConn(sf.conn)
+	if sf.guard != nil {
+		p = sf.guard.Identify(p, sf.sessionID.Load())
+		sf.guard.ObserveTLS(p, sf.sessionID.Load())
+	}
 	sf.peerMu.Lock()
 	sf.peer = p
 	sf.peerMu.Unlock()
+	if sf.guard != nil && sf.guard.Policy().MACRecheckInterval > 0 {
+		sf.guard.WatchMAC(sf.ctx, sf.sessionID.Load(), sf.PeerInfo,
+			func(np secevent.PeerInfo) { sf.peerMu.Lock(); sf.peer = np; sf.peerMu.Unlock() },
+			func() { sf.noteEnd("the peer's MAC address changed during the session"); sf.cancel() })
+	}
 }
 
 func (sf *Client) endCyber() {
@@ -294,4 +327,119 @@ func (sf *Client) endCyber() {
 func netipAddrPort(a net.Addr) netip.AddrPort {
 	ap, _ := netip.ParseAddrPort(addrString(a))
 	return netip.AddrPortFrom(ap.Addr().Unmap(), ap.Port())
+}
+
+// SetSecurityPolicy applies a security policy: who may connect, how many and
+// how fast, MAC pinning, and the event delivery options. Call it before
+// ListenAndServer. Everything in a Policy defaults to observing and
+// reporting; refusal happens only where the policy asks for it.
+func (sf *Server) SetSecurityPolicy(p secevent.Policy) *Server {
+	sf.guard = secevent.NewGuard(p, &sf.cyber)
+	if p.Sink != nil {
+		sf.cyber.SetSinkOptions(p.Sink, secevent.Options{AggregateWindow: p.AggregateWindow, MaxRaw: p.MaxRaw})
+	}
+	return sf
+}
+
+// reportTLSError classifies a failed TLS handshake and raises the event that
+// says why: a rejected certificate, a client speaking plaintext to the TLS
+// port, a scanner, a stalled handshake.
+func (sf *Server) reportTLSError(err error, peer secevent.PeerInfo, id uint64) {
+	if !sf.cyber.Enabled() {
+		return
+	}
+	if e, ok := classifyTLSError(err, true); ok {
+		e.Peer, e.SessionID = peer, id
+		if e.tlsInfo != nil {
+			e.Peer.TLS = e.tlsInfo
+		}
+		sf.cyber.Emit(e.Event)
+	}
+}
+
+type tlsEvent struct {
+	secevent.Event
+	tlsInfo *secevent.TLSPeer
+}
+
+// classifyTLSError maps a handshake failure to a security event.
+func classifyTLSError(err error, handshake bool) (tlsEvent, bool) {
+	var out tlsEvent
+	out.Err = err
+	var cve *tls.CertificateVerificationError
+	var rhe tls.RecordHeaderError
+	msg := err.Error()
+	switch {
+	case errors.As(err, &cve):
+		out.Kind, out.Action = secevent.KindTLSCertRejected, secevent.ActRejected
+		out.Detail = "the peer's certificate was rejected: " + cve.Err.Error()
+		if len(cve.UnverifiedCertificates) > 0 {
+			c := cve.UnverifiedCertificates[0]
+			sum := sha256.Sum256(c.Raw)
+			out.tlsInfo = &secevent.TLSPeer{Subject: c.Subject.String(), Issuer: c.Issuer.String(),
+				SerialHex: c.SerialNumber.Text(16), NotAfter: c.NotAfter,
+				FingerprintSHA256: hex.EncodeToString(sum[:])}
+		}
+	case errors.As(err, &rhe):
+		if rhe.RecordHeader[0] == startFrame {
+			out.Kind = secevent.KindTLSPlaintext
+			out.Detail = "a peer is speaking plaintext IEC 104 to the TLS port"
+		} else {
+			out.Kind = secevent.KindTLSNonTLSProbe
+			out.Detail = fmt.Sprintf("non-TLS bytes on the TLS port (starting % x): a scanner or the wrong protocol", rhe.RecordHeader[:])
+		}
+		out.Action = secevent.ActRejected
+	case errors.Is(err, os.ErrDeadlineExceeded):
+		out.Kind, out.Action = secevent.KindTLSHandshakeTO, secevent.ActDisconnected
+		out.Detail = "the TLS handshake did not complete in time"
+	case strings.Contains(msg, "client didn't provide a certificate"):
+		out.Kind, out.Action = secevent.KindTLSNoClientCert, secevent.ActRejected
+		out.Detail = "a client certificate is required and none was presented"
+	case strings.Contains(msg, "remote error: tls: bad certificate"),
+		strings.Contains(msg, "remote error: tls: unknown certificate authority"),
+		strings.Contains(msg, "remote error: tls: certificate expired"),
+		strings.Contains(msg, "remote error: tls: unknown certificate"),
+		strings.Contains(msg, "remote error: tls: certificate required"):
+		out.Kind, out.Action = secevent.KindTLSLocalCertReject, secevent.ActRejected
+		out.Detail = "the peer rejected OUR certificate (" + msg + ")"
+	default:
+		// Anything else is a TLS failure only when we know a handshake was
+		// under way; a dialling client cannot tell it from a refused connect.
+		if !handshake {
+			return out, false
+		}
+		out.Kind, out.Action = secevent.KindTLSHandshakeFailed, secevent.ActRejected
+		out.Detail = "TLS handshake failed"
+	}
+	return out, true
+}
+
+// reportDialError raises the TLS event behind a failed dial, when it was one.
+func reportDialError(emit func(secevent.Event), err error) {
+	if te, ok := classifyTLSError(err, false); ok {
+		te.Peer = secevent.PeerInfo{Network: "tcp"}
+		te.Peer.TLS = te.tlsInfo
+		emit(te.Event)
+	}
+}
+
+// SetSecurityPolicy applies a security policy to the connections this client
+// makes: peer identification, MAC change detection and the event delivery
+// options. Limits on incoming connections do not apply to a client.
+func (sf *ClientOption) SetSecurityPolicy(p secevent.Policy) *ClientOption {
+	sf.policy = &p
+	return sf
+}
+
+// guardFor builds the guard of a dialling endpoint. Without a policy it is
+// the default one: peers are identified and changes noticed, nothing is
+// limited or refused.
+func guardFor(p *secevent.Policy, em *secevent.Emitter) *secevent.Guard {
+	if p == nil {
+		return secevent.NewGuard(secevent.Policy{}, em)
+	}
+	if p.Sink != nil {
+		em.SetSinkOptions(p.Sink, secevent.Options{AggregateWindow: p.AggregateWindow, MaxRaw: p.MaxRaw})
+	}
+	return secevent.NewGuard(*p, em)
 }
