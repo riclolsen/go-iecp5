@@ -299,7 +299,15 @@ func (g *Guard) WatchMAC(ctx context.Context, id uint64, get func() PeerInfo, se
 			cur := get()
 			ip := cur.RemoteAddr.Addr().Unmap()
 			res, err := netpeer.LookupTimeout(g.p.Resolver, ip, g.p.MACLookupTimeout)
-			if err != nil || res.MAC == nil || cur.MAC == nil || bytes.Equal(res.MAC, cur.MAC) {
+			if err != nil || res.MAC == nil || bytes.Equal(res.MAC, cur.MAC) {
+				continue
+			}
+			if cur.MAC == nil {
+				// No MAC was known at admission: this is the baseline that
+				// later lookups are compared with, not a change.
+				cur.MAC = res.MAC
+				set(cur)
+				g.p.MACCache.Observe(ip, res.MAC)
 				continue
 			}
 			old := cur.MAC

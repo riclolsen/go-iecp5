@@ -60,10 +60,22 @@ type Inspector struct {
 	bk      *buckets
 	scan    *secmon.Scan
 	rejects *secmon.Bucket
+	// profile104 enables the check that a type is among those IEC 60870-5-104
+	// selects; an IEC 60870-5-101 endpoint legitimately uses others.
+	profile104 bool
 }
 
+// Protocol says which companion standard an inspector serves.
+type Protocol uint8
+
+// Protocols.
+const (
+	CS104 Protocol = iota
+	CS101
+)
+
 // New creates the inspector of a session. guard may be nil.
-func New(h Host, g *secevent.Guard, pol secevent.Policy) *Inspector {
+func New(h Host, g *secevent.Guard, pol secevent.Policy, proto Protocol) *Inspector {
 	pol = pol.WithDefaults() // a nil guard means nobody else filled them in
 	b := func(r secevent.Rate) *secmon.Bucket { return secmon.NewBucket(r.N, r.Per, 0) }
 	l := pol.Limits
@@ -71,7 +83,8 @@ func New(h Host, g *secevent.Guard, pol secevent.Policy) *Inspector {
 		host: h, pol: pol, guard: g,
 		bk: &buckets{commands: b(l.Commands), interrogation: b(l.Interrogation), counter: b(l.CounterInterrogation),
 			read: b(l.Read), clock: b(l.ClockSync), reset: b(l.ResetProcess)},
-		scan: secmon.NewScan(pol.ScanThreshold, pol.ScanWindow),
+		scan:       secmon.NewScan(pol.ScanThreshold, pol.ScanWindow),
+		profile104: proto == CS104,
 	}
 }
 
@@ -103,7 +116,7 @@ func unknownKey(a *asdu.ASDU) uint64 {
 // noteUnknown feeds the scan detector: one session asking for many things
 // that do not exist is enumerating the station.
 func (in *Inspector) noteUnknown(a *asdu.ASDU) {
-	if in.scan == nil {
+	if in.scan == nil || !in.host.Enabled() {
 		return
 	}
 	if in.scan.Note(unknownKey(a), time.Now()) {
@@ -154,12 +167,23 @@ func (in *Inspector) flood(b *secmon.Bucket, kind secevent.Kind, a *asdu.ASDU, w
 // inspect examines a decoded request before the handler sees it. It raises
 // the security events and returns true when policy says the handler must not
 // be called (a refusal has then already been sent).
+//
+// The policy is enforced whether or not events are being collected: only
+// the observations that exist solely to raise events are skipped without a
+// sink.
 func (in *Inspector) Inspect(a *asdu.ASDU, raw []byte) (block bool) {
-	if !in.host.Enabled() {
-		return false
-	}
+	on := in.host.Enabled()
 	in.mu.Lock()
 	defer in.mu.Unlock()
+	if on {
+		in.observe(a, raw)
+	}
+	return in.enforce(a, raw, on)
+}
+
+// observe raises the events that only report: profile, direction, form,
+// originator and the audit trail.
+func (in *Inspector) observe(a *asdu.ASDU, raw []byte) {
 	t := a.Type
 	ev := func(kind secevent.Kind, act secevent.Action, detail string, err error) {
 		e := Event(kind, a, act, detail)
@@ -167,11 +191,11 @@ func (in *Inspector) Inspect(a *asdu.ASDU, raw []byte) (block bool) {
 		in.host.Emit(e)
 	}
 
-	// Is it something a 104 peer sends, and in the direction it should go?
+	// Is it something a peer sends, and in the direction it should go?
 	switch {
 	case asdu.IsSecurity(t):
 		ev(secevent.KindProtoSecureAuth, secevent.ActObserved, "IEC 62351-5 authentication ASDU: this endpoint does not implement it", nil)
-	case !asdu.InProfile104(t):
+	case in.profile104 && !asdu.InProfile104(t):
 		if !(asdu.IsPrivate(t) && in.pol.AllowPrivateTypes) {
 			ev(secevent.KindProtoNotInProfile, secevent.ActObserved,
 				fmt.Sprintf("type %s is not among the ASDUs IEC 60870-5-104 selects", t), nil)
@@ -213,6 +237,20 @@ func (in *Inspector) Inspect(a *asdu.ASDU, raw []byte) (block bool) {
 	// The audit trail: what operators need on record.
 	if !in.pol.DisableAudit {
 		in.audit(a, raw)
+	}
+}
+
+// enforce applies the request policy; true means the handler must not see
+// the request. Events are raised only when on.
+func (in *Inspector) enforce(a *asdu.ASDU, raw []byte, on bool) bool {
+	t := a.Type
+	ev := func(kind secevent.Kind, act secevent.Action, detail string, err error) {
+		if !on {
+			return
+		}
+		e := Event(kind, a, act, detail)
+		e.Err, e.Raw = err, raw
+		in.host.Emit(e)
 	}
 
 	// Does the station or object exist?
@@ -280,7 +318,7 @@ func (in *Inspector) Inspect(a *asdu.ASDU, raw []byte) (block bool) {
 			}
 		}
 	}
-	if (asdu.IsProcessCommand(t) || t == asdu.C_RP_NA_1 || asdu.IsParameter(t)) && in.guard != nil && in.pol.DuplicateWindow > 0 {
+	if on && (asdu.IsProcessCommand(t) || t == asdu.C_RP_NA_1 || asdu.IsParameter(t)) && in.guard != nil && in.pol.DuplicateWindow > 0 {
 		key := fmt.Sprintf("%d/%d/%d/%x", t, a.CommonAddr, a.Coa.Cause, a.InfoObj)
 		if in.guard.SeenCommand(key, time.Now()) {
 			ev(secevent.KindCmdDuplicate, secevent.ActObserved,
@@ -320,8 +358,18 @@ func (in *Inspector) Inspect(a *asdu.ASDU, raw []byte) (block bool) {
 	return false
 }
 
-// audit raises the events that record control functions.
+// hasBody reports whether a carries at least n octets of information
+// element after the first object address, so that the typed getters, which
+// assume a well-formed object, cannot index past the end.
+func hasBody(a *asdu.ASDU, n int) bool {
+	return a.InfoObjAddrSize > 0 && len(a.InfoObj) >= a.InfoObjAddrSize+n
+}
+
+// audit raises the events that record control functions. A malformed
+// request has already been reported by the validation; the audit records
+// only what it can decode safely.
 func (in *Inspector) audit(a *asdu.ASDU, raw []byte) {
+	defer func() { _ = recover() }() // a decoder fault must never reach the session
 	t := a.Type
 	emit := func(kind secevent.Kind, value, detail string) {
 		e := Event(kind, a, secevent.ActObserved, detail)
@@ -333,16 +381,16 @@ func (in *Inspector) audit(a *asdu.ASDU, raw []byte) {
 		if a.Coa.Cause == asdu.Activation || a.Coa.Cause == asdu.Deactivation {
 			emit(secevent.KindCmdReceived, asdu.DescribeCommand(a), "process command received")
 		}
-	case t == asdu.C_IC_NA_1:
+	case t == asdu.C_IC_NA_1 && hasBody(a, 1):
 		_, q := a.GetInterrogationCmd()
 		emit(secevent.KindCtrlInterrogation, fmt.Sprintf("QOI=%d", q), "interrogation command")
-	case t == asdu.C_CI_NA_1:
+	case t == asdu.C_CI_NA_1 && hasBody(a, 1):
 		_, q := a.GetCounterInterrogationCmd()
 		emit(secevent.KindCtrlInterrogation, fmt.Sprintf("QCC=%v", q), "counter interrogation command")
-	case t == asdu.C_RP_NA_1:
+	case t == asdu.C_RP_NA_1 && hasBody(a, 1):
 		_, q := a.GetResetProcessCmd()
 		emit(secevent.KindCtrlResetProcess, fmt.Sprintf("QRP=%d", q), "RESET PROCESS command: a restart of the station's process")
-	case t == asdu.C_CS_NA_1:
+	case t == asdu.C_CS_NA_1 && hasBody(a, 7):
 		_, tm := a.GetClockSynchronizationCmd()
 		delta := time.Until(tm)
 		emit(secevent.KindCtrlClockSync, tm.Format(time.RFC3339Nano), fmt.Sprintf("clock synchronisation, %v from the local clock", delta.Round(time.Millisecond)))

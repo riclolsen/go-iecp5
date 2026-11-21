@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"net"
 	"net/netip"
 	"strings"
 	"sync"
@@ -248,4 +249,66 @@ func TestEmitRacingCloseLosesNothing(t *testing.T) {
 			t.Fatalf("%d events accepted, %d delivered", accepted.Load(), got.Load())
 		}
 	}
+}
+
+// A repeat arriving after its window ended, before the ticker settled it,
+// must not lose the repeats held back.
+func TestAggregationKeepsCountAcrossWindows(t *testing.T) {
+	c := &collector{}
+	d := NewDispatcher(c, Options{AggregateWindow: time.Hour})
+	t0 := time.Now()
+	for i := range 5 {
+		d.Emit(Event{Kind: KindProtoBadAPCI, SessionID: 1, Time: t0.Add(time.Duration(i) * time.Second)})
+	}
+	d.Emit(Event{Kind: KindProtoBadAPCI, SessionID: 1, Time: t0.Add(2 * time.Hour)})
+	d.Close()
+	total := 0
+	for _, e := range c.all() {
+		total += e.Count
+	}
+	if total != 6 {
+		t.Fatalf("counted %d occurrences, want 6", total)
+	}
+}
+
+// A session admitted without a MAC learns one later and then watches it.
+func TestWatchMACBaselinesAfterInitialMiss(t *testing.T) {
+	var step atomic.Int32
+	macs := []string{"", "02:00:00:00:00:01", "02:00:00:00:00:01", "02:00:00:00:00:02"}
+	p := DefaultPolicy()
+	p.MACRecheckInterval = 5 * time.Millisecond
+	p.Resolver = netpeer.ResolverFunc(func(context.Context, netip.Addr) (netpeer.Result, error) {
+		i := min(int(step.Add(1)), len(macs)-1)
+		if macs[i] == "" {
+			return netpeer.Result{}, netpeer.ErrNotFound
+		}
+		m, _ := net.ParseMAC(macs[i])
+		return netpeer.Result{MAC: m}, nil
+	})
+	c := &collector{}
+	d := NewDispatcher(c, Options{AggregateWindow: -1})
+	em := &Emitter{}
+	em.SetDispatcher(d)
+	g := NewGuard(p, em)
+	var mu sync.Mutex
+	peer := PeerInfo{Network: "tcp", RemoteAddr: netip.MustParseAddrPort("192.0.2.9:2404")}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	g.WatchMAC(ctx, 1, func() PeerInfo { mu.Lock(); defer mu.Unlock(); return peer },
+		func(np PeerInfo) { mu.Lock(); peer = np; mu.Unlock() }, nil)
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, e := range c.all() {
+			if e.Kind == KindPeerMACChangedLive {
+				if !strings.Contains(e.Detail, "02:00:00:00:00:01") {
+					t.Fatalf("change not against the learnt baseline: %s", e.Detail)
+				}
+				cancel()
+				d.Close()
+				return
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("no live MAC change reported after an initial miss")
 }

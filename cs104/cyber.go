@@ -256,7 +256,7 @@ func (sf *SrvSession) beginCyber() {
 	if sf.guard != nil {
 		sf.pol = sf.guard.Policy()
 		sf.fl = secasdu.NewFrameLimits(sf.pol.Limits)
-		sf.insp = secasdu.New(srvHost{sf}, sf.guard, sf.pol)
+		sf.insp = secasdu.New(srvHost{sf}, sf.guard, sf.pol, secasdu.CS104)
 	}
 	p := peerInfoFromConn(sf.conn)
 	if sf.presetPeer != nil {
