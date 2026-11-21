@@ -5,3 +5,6 @@
 
 # explorer downloads (cs104_explorer file transfer)
 iec104-files/
+
+# example binaries built in place
+_examples/cs104_explorer/cs104explorer

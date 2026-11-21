@@ -170,6 +170,10 @@ Runnable programs live under [`_examples`](_examples) (each buildable with
   reverse-connection server.
 - `cs101_client_general` — minimal 101 serial master.
 
+## Security events
+
+Every endpoint can report suspicious protocol activity (unexpected connections, rejected certificates, unknown objects, replayed frames, floods, MAC changes, restart/file/parameter functions) to a callback, with the peer's MAC address when it is on the same link. Report-only by default. See [docs/security.md](docs/security.md).
+
 ## Interoperability tests
 
 `interop/` runs go-iecp5 as client and as station against lib60870, OpenMUC
