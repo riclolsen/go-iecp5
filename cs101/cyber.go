@@ -115,7 +115,7 @@ func (sf *Server) beginCyber() {
 	if p := sf.cyber.policy.Load(); p != nil {
 		pol = *p
 	}
-	sf.cyber.insp = secasdu.New(csHost{sf}, nil, pol)
+	sf.cyber.insp = secasdu.New(csHost{sf}, nil, pol, secasdu.CS101)
 }
 
 // csHost lets the shared inspector act on the server.

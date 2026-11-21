@@ -126,6 +126,9 @@ func (c *Cache) Observe(ip netip.Addr, mac net.HardwareAddr) []Change {
 		out = append(out, Change{Kind: kind, IP: ip, MAC: mac, OtherIP: m.ip})
 	}
 	r.MAC, r.Last = ms, now
+	if _, ok := c.macs[ms]; !ok {
+		c.makeMACRoom()
+	}
 	c.macs[ms] = macRec{ip: ip, last: now}
 	return out
 }
@@ -195,19 +198,54 @@ func (c *Cache) Len() int {
 }
 
 func (c *Cache) expire(now time.Time) {
-	if len(c.ips) < c.opt.MaxEntries/2 {
-		return // nothing worth the scan
-	}
-	for ip, r := range c.ips {
-		if now.Sub(r.Last) > c.opt.TTL {
-			delete(c.ips, ip)
+	if len(c.ips) >= c.opt.MaxEntries/2 {
+		for ip, r := range c.ips {
+			if now.Sub(r.Last) > c.opt.TTL {
+				c.removeIP(ip)
+			}
 		}
 	}
+	// The reverse index is bounded on its own: it can hold MACs that no
+	// longer belong to any remembered IP.
+	if len(c.macs) >= c.opt.MaxEntries/2 {
+		for m, r := range c.macs {
+			if now.Sub(r.last) > c.opt.TTL {
+				delete(c.macs, m)
+			}
+		}
+	}
+}
+
+// removeIP forgets ip and the reverse entry that points at it.
+func (c *Cache) removeIP(ip netip.Addr) {
+	if r := c.ips[ip]; r != nil && r.MAC != "" {
+		c.dropMAC(r.MAC, ip)
+	}
+	delete(c.ips, ip)
+}
+
+// dropMAC removes the reverse entry of mac if it still points at ip.
+func (c *Cache) dropMAC(mac string, ip netip.Addr) {
+	if m, ok := c.macs[mac]; ok && m.ip == ip {
+		delete(c.macs, mac)
+	}
+}
+
+// makeMACRoom evicts the least recently seen MAC when the reverse index is
+// full.
+func (c *Cache) makeMACRoom() {
+	if len(c.macs) < c.opt.MaxEntries {
+		return
+	}
+	var oldest string
+	var ot time.Time
+	first := true
 	for m, r := range c.macs {
-		if now.Sub(r.last) > c.opt.TTL {
-			delete(c.macs, m)
+		if first || r.last.Before(ot) {
+			oldest, ot, first = m, r.last, false
 		}
 	}
+	delete(c.macs, oldest)
 }
 
 // makeRoom evicts the least recently seen entry when the cache is full.
@@ -223,7 +261,7 @@ func (c *Cache) makeRoom() {
 			oldest, ot, first = ip, r.Last, false
 		}
 	}
-	delete(c.ips, oldest)
+	c.removeIP(oldest)
 }
 
 type saved struct {

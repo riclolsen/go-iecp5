@@ -204,11 +204,17 @@ func (d *Dispatcher) handle(e Event) {
 	if now.IsZero() {
 		now = time.Now()
 	}
-	if a, ok := d.agg[k]; ok && now.Sub(a.start) < d.opt.AggregateWindow {
-		a.suppressed++
-		a.last = e
-		d.aggregated.Add(1)
-		return
+	if a, ok := d.agg[k]; ok {
+		if now.Sub(a.start) < d.opt.AggregateWindow {
+			a.suppressed++
+			a.last = e
+			d.aggregated.Add(1)
+			return
+		}
+		// The window ended before the ticker settled it: deliver its
+		// repeats now, or replacing the entry would lose their count.
+		d.settle(a)
+		delete(d.agg, k)
 	}
 	if len(d.agg) >= d.opt.AggregateKeys {
 		d.flush(now, true) // bounded memory: settle everything rather than grow
@@ -223,15 +229,20 @@ func (d *Dispatcher) flush(now time.Time, force bool) {
 		if !force && now.Sub(a.start) < d.opt.AggregateWindow {
 			continue
 		}
-		if a.suppressed > 0 {
-			e := a.last
-			e.Count = a.suppressed
-			e.FirstSeen = a.start
-			d.deliver(e)
-		}
+		d.settle(a)
 		delete(d.agg, k)
 	}
 	d.reportDrops()
+}
+
+// settle delivers the repeats an aggregation entry holds back, if any.
+func (d *Dispatcher) settle(a *aggEntry) {
+	if a.suppressed > 0 {
+		e := a.last
+		e.Count = a.suppressed
+		e.FirstSeen = a.start
+		d.deliver(e)
+	}
 }
 
 func (d *Dispatcher) reportDrops() {

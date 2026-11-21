@@ -22,7 +22,9 @@ Delivery never slows the protocol. Events go through a bounded queue to one
 goroutine; when the queue overflows events are dropped and counted
 (`SecurityStats()`), and a `meta.events_dropped` event says how many. Repeats of
 the same thing from one session are aggregated into one event with `Count`.
-With no sink set, the cost is one atomic load.
+With no sink set, events cost one atomic load. The request policy (read-only,
+denied functions, unknown objects, command age, rate limits) is enforced
+whether or not a sink is set; only the events are skipped.
 
 Several endpoints can share one dispatcher: `SetCyberDispatcher(d)`.
 

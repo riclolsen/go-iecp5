@@ -106,3 +106,22 @@ func TestStaticResolverAndTimeout(t *testing.T) {
 		t.Errorf("slow resolver not bounded: %v", err)
 	}
 }
+
+// The MAC index is bounded on its own: one IP cycling through MACs must not
+// grow it without limit.
+func TestCacheReverseIndexBounded(t *testing.T) {
+	c := NewCache(CacheOptions{MaxEntries: 8})
+	ip := netip.MustParseAddr("10.0.0.1")
+	for i := 0; i < 1000; i++ {
+		c.Observe(ip, net.HardwareAddr{2, 0, 0, 0, byte(i >> 8), byte(i)})
+	}
+	for i := 0; i < 1000; i++ {
+		c.Observe(netip.AddrFrom4([4]byte{10, 1, byte(i >> 8), byte(i)}), net.HardwareAddr{4, 0, 0, 0, byte(i >> 8), byte(i)})
+	}
+	c.mu.Lock()
+	n := len(c.macs)
+	c.mu.Unlock()
+	if n > 8 || c.Len() > 8 {
+		t.Fatalf("reverse index %d, ips %d, with MaxEntries 8", n, c.Len())
+	}
+}
