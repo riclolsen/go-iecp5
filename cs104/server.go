@@ -97,6 +97,11 @@ func (sf *Server) ListenAndServer(addr string) error {
 		sf.Critical("server run failed, %v", err)
 		return err
 	}
+	return sf.serve(listen)
+}
+
+// serve accepts connections from listen until it is closed.
+func (sf *Server) serve(listen net.Listener) error {
 	sf.mux.Lock()
 	sf.listen = listen
 	sf.mux.Unlock()
@@ -114,15 +119,44 @@ func (sf *Server) ListenAndServer(addr string) error {
 	if advice := sf.config.flowControlAdvice(); advice != "" {
 		sf.Warn("%s", advice)
 	}
+	var backoff time.Duration
 	for {
 		conn, err := listen.Accept()
 		if err != nil {
-			sf.Critical("server run failed, %v", err)
-			return err
+			if errors.Is(err, net.ErrClosed) {
+				sf.Critical("server run failed, %v", err)
+				return err
+			}
+			// Anything else, such as running out of file descriptors, is not
+			// a reason to stop serving: a peer able to exhaust descriptors
+			// would otherwise switch the outstation off with it. Wait, as
+			// net/http does, and keep accepting.
+			if backoff == 0 {
+				backoff = 5 * time.Millisecond
+			} else if backoff *= 2; backoff > time.Second {
+				backoff = time.Second
+			}
+			sf.Critical("accept failed, retrying in %v: %v", backoff, err)
+			time.Sleep(backoff)
+			continue
 		}
+		backoff = 0
 
 		sf.wg.Add(1)
 		go func() {
+			// The TLS handshake is done here, bounded by t₀, rather than
+			// lazily inside the first read: a failed or stalled handshake is
+			// then seen for what it is and cannot hold a session slot.
+			if tc, ok := conn.(*tls.Conn); ok {
+				_ = tc.SetDeadline(time.Now().Add(sf.config.ConnectTimeout0))
+				if err := tc.HandshakeContext(ctx); err != nil {
+					sf.Warn("TLS handshake with %v failed: %v", conn.RemoteAddr(), err)
+					_ = conn.Close()
+					sf.wg.Done()
+					return
+				}
+				_ = tc.SetDeadline(time.Time{})
+			}
 			sess := &SrvSession{
 				config:   &sf.config,
 				params:   &sf.params,

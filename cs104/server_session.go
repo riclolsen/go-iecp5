@@ -6,8 +6,10 @@ package cs104
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -67,64 +69,18 @@ func (sf *SrvSession) recvLoop() {
 		sf.Debug("recvLoop stopped!")
 	}()
 
+	fr := newFrameReader(sf.conn, sf.config.SendUnAckTimeout1)
 	for {
-		rawData := make([]byte, APDUSizeMax)
-		for rdCnt, length := 0, 2; rdCnt < length; {
-			byteCount, err := io.ReadFull(sf.conn, rawData[rdCnt:length])
-			if err != nil {
-				// See: https://github.com/golang/go/issues/4373
-				if err != io.EOF && err != io.ErrClosedPipe ||
-					strings.Contains(err.Error(), "use of closed network connection") {
-					sf.Error("receive failed, %v", err)
-					return
-				}
-
-				if e, ok := err.(net.Error); ok && !e.Temporary() {
-					sf.Error("receive failed, %v", err)
-					return
-				}
-
-				if byteCount == 0 && err == io.EOF {
-					sf.Error("remote connect closed, %v", err)
-					return
-				}
-			}
-
-			rdCnt += byteCount
-			if rdCnt == 0 {
-				continue
-			} else if rdCnt == 1 {
-				if rawData[0] != startFrame {
-					rdCnt = 0
-					continue
-				}
-			} else {
-				if rawData[0] != startFrame {
-					// resync: keep a start character seen in the second
-					// position instead of discarding it
-					if rawData[1] == startFrame {
-						rawData[0] = startFrame
-						rdCnt, length = 1, 2
-					} else {
-						rdCnt, length = 0, 2
-					}
-					continue
-				}
-				length = int(rawData[1]) + 2
-				if length < APCICtlFiledSize+2 || length > APDUSizeMax {
-					rdCnt, length = 0, 2
-					continue
-				}
-				if rdCnt == length {
-					apdu := rawData[:length]
-					sf.Debug("RX Raw[% x]", apdu)
-					select {
-					case sf.rcvRaw <- apdu:
-					case <-sf.ctx.Done():
-						return
-					}
-				}
-			}
+		apdu, err := fr.next()
+		if err != nil {
+			sf.Error("receive failed, %v", err)
+			return
+		}
+		sf.Debug("RX Raw[% x]", apdu)
+		select {
+		case sf.rcvRaw <- apdu:
+		case <-sf.ctx.Done():
+			return
 		}
 	}
 }
@@ -145,7 +101,14 @@ func (sf *SrvSession) sendLoop() {
 		case apdu := <-sf.sendRaw:
 			sf.Debug("TX Raw[% x]", apdu)
 			for wrCnt := 0; len(apdu) > wrCnt; {
+				// A peer that stops reading must not be able to hold this
+				// goroutine, and with it the state machine, for ever.
+				_ = sf.conn.SetWriteDeadline(time.Now().Add(sf.config.SendUnAckTimeout1))
 				byteCount, err := sf.conn.Write(apdu[wrCnt:])
+				if errors.Is(err, os.ErrDeadlineExceeded) {
+					sf.Error("sendRaw stalled for longer than t₁, peer is not reading: %v", err)
+					return
+				}
 				if err != nil {
 					// See: https://github.com/golang/go/issues/4373
 					if err != io.EOF && err != io.ErrClosedPipe ||
@@ -197,11 +160,11 @@ func (sf *SrvSession) run(ctx context.Context) {
 
 	sendSFrame := func(rcvSN uint16) {
 		sf.Debug("TX sFrame %v", sAPCI{rcvSN})
-		sf.sendRaw <- newSFrame(rcvSN)
+		sf.queueRaw(newSFrame(rcvSN))
 	}
 	sendUFrame := func(which byte) {
 		sf.Debug("TX uFrame %v", uAPCI{which})
-		sf.sendRaw <- newUFrame(which)
+		sf.queueRaw(newUFrame(which))
 	}
 
 	// confirmStopDtIfDone answers a STOPDT activation once the I-frames that
@@ -232,7 +195,7 @@ func (sf *SrvSession) run(ctx context.Context) {
 		sf.pending = append(sf.pending, seqPending{seqNo & 32767, time.Now()})
 
 		sf.Debug("TX iFrame %v", iAPCI{seqNo, sf.seqNoRcv})
-		sf.sendRaw <- iframe
+		sf.queueRaw(iframe)
 	}
 	if sf.onConnection != nil {
 		sf.onConnection(sf)
@@ -628,4 +591,15 @@ func (sf *SrvSession) Send(u *asdu.ASDU) error {
 // UnderlyingConn got under net.conn
 func (sf *SrvSession) UnderlyingConn() net.Conn {
 	return sf.conn
+}
+
+// queueRaw hands a frame to the send loop. It gives up when the session ends:
+// the send loop is the only reader of sendRaw, so once it has stopped, for
+// instance because the peer stopped reading, a bare channel send here would
+// block the state machine for ever instead of letting it tear the session down.
+func (sf *SrvSession) queueRaw(b []byte) {
+	select {
+	case sf.sendRaw <- b:
+	case <-sf.ctx.Done():
+	}
 }

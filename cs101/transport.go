@@ -7,10 +7,12 @@ package cs101
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.bug.st/serial"
@@ -70,6 +72,42 @@ type Transporter struct {
 	mu       sync.Mutex
 	listener net.Listener
 	watched  bool
+	acc      *tcpAcceptor
+	busy     atomic.Bool
+	onBusy   func(net.Addr)
+}
+
+// tcpAcceptor owns the listener's Accept loop. One connection is served at a
+// time; while it is, any other that arrives is accepted and closed at once.
+// Left in the kernel backlog instead, it would sit unanswered until the
+// active one dropped, which gives a port scanner a free slot and tells the
+// operator nothing.
+type tcpAcceptor struct {
+	conns chan net.Conn
+	done  chan struct{}
+	err   error
+}
+
+// busyConn marks the Transporter free again when the connection closes.
+type busyConn struct {
+	net.Conn
+	once sync.Once
+	free func()
+}
+
+func (c *busyConn) Close() error {
+	err := c.Conn.Close()
+	c.once.Do(c.free)
+	return err
+}
+
+// SetBusyHandler sets a function called with the remote address of every
+// connection turned away because another is being served (TCP server
+// transport only).
+func (tr *Transporter) SetBusyHandler(f func(net.Addr)) {
+	tr.mu.Lock()
+	tr.onBusy = f
+	tr.mu.Unlock()
 }
 
 // NewTransporter builds a Transporter for the given transport selection.
@@ -105,18 +143,23 @@ func (tr *Transporter) Open(ctx context.Context) (io.ReadWriteCloser, string, er
 		return conn, "tcp -> " + tr.tcp.Address, nil
 
 	case TransportTCPServer:
-		l, err := tr.getListener(ctx)
+		l, acc, err := tr.getListener(ctx)
 		if err != nil {
 			return nil, "", err
 		}
-		conn, err := l.Accept()
-		if err != nil {
+		select {
+		case conn := <-acc.conns:
+			tr.busy.Store(true)
+			bc := &busyConn{Conn: conn, free: func() { tr.busy.Store(false) }}
+			return bc, fmt.Sprintf("tcp-listen %s (peer %s)", l.Addr(), conn.RemoteAddr()), nil
+		case <-acc.done:
 			if ctx.Err() != nil {
 				return nil, "", ctx.Err()
 			}
-			return nil, "", err
+			return nil, "", acc.err
+		case <-ctx.Done():
+			return nil, "", ctx.Err()
 		}
-		return conn, fmt.Sprintf("tcp-listen %s (peer %s)", l.Addr(), conn.RemoteAddr()), nil
 
 	default: // TransportSerial
 		mode := &serial.Mode{
@@ -139,11 +182,11 @@ func (tr *Transporter) Open(ctx context.Context) (io.ReadWriteCloser, string, er
 	}
 }
 
-func (tr *Transporter) getListener(ctx context.Context) (net.Listener, error) {
+func (tr *Transporter) getListener(ctx context.Context) (net.Listener, *tcpAcceptor, error) {
 	tr.mu.Lock()
 	defer tr.mu.Unlock()
 	if tr.listener != nil {
-		return tr.listener, nil
+		return tr.listener, tr.acc, nil
 	}
 	var l net.Listener
 	var err error
@@ -153,9 +196,12 @@ func (tr *Transporter) getListener(ctx context.Context) (net.Listener, error) {
 		l, err = net.Listen("tcp", tr.tcp.Address)
 	}
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	tr.listener = l
+	acc := &tcpAcceptor{conns: make(chan net.Conn, 1), done: make(chan struct{})}
+	tr.acc = acc
+	go tr.acceptLoop(l, acc)
 	if !tr.watched {
 		tr.watched = true
 		// Unblock a pending Accept when the endpoint shuts down.
@@ -164,7 +210,38 @@ func (tr *Transporter) getListener(ctx context.Context) (net.Listener, error) {
 			_ = tr.Close()
 		}()
 	}
-	return l, nil
+	return l, acc, nil
+}
+
+func (tr *Transporter) acceptLoop(l net.Listener, acc *tcpAcceptor) {
+	defer close(acc.done)
+	for {
+		conn, err := l.Accept()
+		if err != nil {
+			if errors.Is(err, net.ErrClosed) {
+				acc.err = err
+				return
+			}
+			// Not fatal (descriptor exhaustion and the like): keep serving.
+			time.Sleep(50 * time.Millisecond)
+			continue
+		}
+		if tr.busy.Load() {
+			tr.mu.Lock()
+			f := tr.onBusy
+			tr.mu.Unlock()
+			if f != nil {
+				f(conn.RemoteAddr())
+			}
+			_ = conn.Close()
+			continue
+		}
+		select {
+		case acc.conns <- conn:
+		default:
+			_ = conn.Close() // one already waiting for Open
+		}
+	}
 }
 
 // Close closes the listener (if any). Connections handed out by Open are
