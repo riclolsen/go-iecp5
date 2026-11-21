@@ -49,11 +49,16 @@ func policyServer(t *testing.T, p secevent.Policy) (*Server, *evCollector, strin
 // expectClosed asserts the server closed conn without our sending anything.
 func expectClosed(t *testing.T, conn net.Conn) {
 	t.Helper()
-	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
-	if _, err := conn.Read(make([]byte, 1)); err == nil {
-		t.Fatal("expected the connection to be closed")
-	} else if ne, ok := err.(net.Error); ok && ne.Timeout() {
-		t.Fatal("connection was not closed")
+	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	buf := make([]byte, 512)
+	for {
+		// Anything the server had already queued may arrive first.
+		if _, err := conn.Read(buf); err != nil {
+			if ne, ok := err.(net.Error); ok && ne.Timeout() {
+				t.Fatal("connection was not closed")
+			}
+			return
+		}
 	}
 }
 

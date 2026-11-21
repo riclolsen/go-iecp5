@@ -218,6 +218,11 @@ func (sf *Client) recvLoop() {
 	}()
 
 	fr := newFrameReader(sf.conn, sf.option.config.SendUnAckTimeout1)
+	if sf.cyberOn() {
+		fr.hook = func(k secevent.Kind, detail string, raw []byte) {
+			sf.emit(secevent.Event{Kind: k, Action: secevent.ActIgnored, Detail: detail, Raw: raw})
+		}
+	}
 	for {
 		apdu, err := fr.next()
 		if err != nil {
@@ -411,6 +416,8 @@ func (sf *Client) run(ctx context.Context) {
 				// to drop the connection with a single bad frame; the log
 				// line is what makes the sender's fault visible.
 				sf.Error("%v, frame ignored [% x]", err, apdu)
+				sf.emit(secevent.Event{Kind: secevent.KindProtoBadAPCI, Action: secevent.ActIgnored,
+					Detail: "malformed APCI: frame not acted on", Err: err, Raw: apdu})
 				continue
 			}
 			sf.framesIn.Add(1)
@@ -419,6 +426,7 @@ func (sf *Client) run(ctx context.Context) {
 				sf.Debug("RX sFrame %v", head)
 				if !sf.updateAckNoOut(head.rcvSN) {
 					sf.Error("fatal incoming acknowledge either earlier than previous or later than sendTime")
+					sf.seqViolation(ackKind(sf.ackNoSend, sf.seqNoSend, head.rcvSN), 0, head.rcvSN, apdu)
 					return
 				}
 
@@ -426,10 +434,18 @@ func (sf *Client) run(ctx context.Context) {
 				sf.Debug("RX iFrame %v", head)
 				if atomic.LoadUint32(&sf.isActive) == inactive {
 					sf.Warn("station not active")
+					sf.emit(secevent.Event{Kind: secevent.KindProtoIWhileStopped, Action: secevent.ActIgnored,
+						Detail: "I-frame received while data transfer is stopped: discarded", Raw: apdu})
 					break // not active, discard apdu
 				}
-				if !sf.updateAckNoOut(head.rcvSN) || head.sendSN != sf.seqNoRcv {
+				if !sf.updateAckNoOut(head.rcvSN) {
 					sf.Error("fatal incoming acknowledge either earlier than previous or later than sendTime")
+					sf.seqViolation(ackKind(sf.ackNoSend, sf.seqNoSend, head.rcvSN), head.sendSN, head.rcvSN, apdu)
+					return
+				}
+				if head.sendSN != sf.seqNoRcv {
+					sf.Error("fatal incoming acknowledge either earlier than previous or later than sendTime")
+					sf.seqViolation(sendSNKind(head.sendSN, sf.seqNoRcv), head.sendSN, head.rcvSN, apdu)
 					return
 				}
 
@@ -455,6 +471,13 @@ func (sf *Client) run(ctx context.Context) {
 				//	sf.sendUFrame(uStartDtConfirm)
 				//	atomic.StoreUint32(&sf.isActive, active)
 				case uStartDtConfirm:
+					if sf.startDtActiveSendSince.Load().(time.Time) == willNotTimeout {
+						sf.emit(secevent.Event{Kind: secevent.KindUnsolUConfirm, Action: secevent.ActObserved,
+							Detail: "STARTDT con received with no STARTDT act outstanding"})
+						if sf.guard != nil && sf.guard.Policy().IgnoreUnsolicitedU {
+							break
+						}
+					}
 					atomic.StoreUint32(&sf.isActive, active)
 					sf.startDtActiveSendSince.Store(willNotTimeout)
 					sf.onActivated(sf)
@@ -462,13 +485,28 @@ func (sf *Client) run(ctx context.Context) {
 				//	sf.sendUFrame(uStopDtConfirm)
 				//	atomic.StoreUint32(&sf.isActive, inactive)
 				case uStopDtConfirm:
+					if sf.stopDtActiveSendSince.Load().(time.Time) == willNotTimeout {
+						sf.emit(secevent.Event{Kind: secevent.KindUnsolUConfirm, Action: secevent.ActObserved,
+							Detail: "STOPDT con received with no STOPDT act outstanding"})
+						if sf.guard != nil && sf.guard.Policy().IgnoreUnsolicitedU {
+							break
+						}
+					}
 					atomic.StoreUint32(&sf.isActive, inactive)
 					sf.stopDtActiveSendSince.Store(willNotTimeout)
 					sf.onDeactivated(sf)
 				case uTestFrActive:
 					sf.queueUFrame(uTestFrConfirm)
 				case uTestFrConfirm:
+					if testFrAliveSendSince == willNotTimeout {
+						sf.emit(secevent.Event{Kind: secevent.KindUnsolUConfirm, Action: secevent.ActIgnored,
+							Detail: "TESTFR con received with no TESTFR act outstanding"})
+					}
 					testFrAliveSendSince = willNotTimeout
+				case uStartDtActive, uStopDtActive:
+					// Control-direction frames: only a master sends them.
+					sf.emit(secevent.Event{Kind: secevent.KindProtoUWrongDir, Action: secevent.ActIgnored,
+						Detail: fmt.Sprintf("%v received by the controlling station: wrong direction", head)})
 				default:
 					sf.Error("illegal U-Frame functions[0x%02x] ignored", head.function)
 				}
@@ -721,4 +759,12 @@ func (sf *Client) SetClientNumber(n int) {
 
 func (sf *Client) ClientNumber() int {
 	return sf.clientNumber
+}
+
+// seqViolation reports the sequence error that is about to close the session.
+func (sf *Client) seqViolation(kind secevent.Kind, send, recv uint16, raw []byte) {
+	sf.noteEnd("sequence error: " + string(kind))
+	sf.emit(secevent.Event{Kind: kind, Action: secevent.ActDisconnected, Fields: secevent.FieldSeq,
+		SendSN: send, RecvSN: recv, ExpectedSN: sf.seqNoRcv, Raw: raw,
+		Detail: seqDetail(kind, send, recv, sf.seqNoRcv, sf.ackNoSend, sf.seqNoSend)})
 }

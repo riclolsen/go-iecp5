@@ -18,6 +18,7 @@ import (
 
 	"github.com/riclolsen/go-iecp5/asdu"
 	"github.com/riclolsen/go-iecp5/clog"
+	"github.com/riclolsen/go-iecp5/internal/secmon"
 	"github.com/riclolsen/go-iecp5/secevent"
 )
 
@@ -73,6 +74,10 @@ type SrvSession struct {
 	endMu     sync.Mutex
 	endReason string
 	guard     *secevent.Guard
+	pol       secevent.Policy
+	bk        *buckets
+	scan      *secmon.Scan
+	rejects   *secmon.Bucket
 	// admission result handed over by the Server, consumed by beginCyber
 	presetID   uint64
 	presetPeer *secevent.PeerInfo
@@ -88,6 +93,11 @@ func (sf *SrvSession) recvLoop() {
 	}()
 
 	fr := newFrameReader(sf.conn, sf.config.SendUnAckTimeout1)
+	if sf.cyberOn() {
+		fr.hook = func(k secevent.Kind, detail string, raw []byte) {
+			sf.emit(secevent.Event{Kind: k, Action: secevent.ActIgnored, Detail: detail, Raw: raw})
+		}
+	}
 	for {
 		apdu, err := fr.next()
 		if err != nil {
@@ -311,6 +321,9 @@ func (sf *SrvSession) run(ctx context.Context) {
 
 		case apdu := <-sf.rcvRaw:
 			idleTimeout3Sine = time.Now() // Every time an i frame, S frame, U frame is received, the idle timer is reset, t3
+			if sf.bk != nil && sf.frameFlood(sf.bk.frames, secevent.KindFloodFrames, "inbound frame rate") {
+				return
+			}
 			apci, asduVal, err := parse(apdu)
 			if err != nil {
 				// A malformed control field is not acted on. Ignoring it
@@ -318,14 +331,21 @@ func (sf *SrvSession) run(ctx context.Context) {
 				// to drop the connection with a single bad frame; the log
 				// line is what makes the sender's fault visible.
 				sf.Error("%v, frame ignored [% x]", err, apdu)
+				sf.emit(secevent.Event{Kind: secevent.KindProtoBadAPCI, Action: secevent.ActIgnored,
+					Detail: "malformed APCI: frame not acted on", Err: err, Raw: apdu})
 				continue
 			}
 			sf.framesIn.Add(1)
 			switch head := apci.(type) {
 			case sAPCI:
 				sf.Debug("RX sFrame %v", head)
+				if sf.bk != nil && head.rcvSN == sf.ackNoSend &&
+					sf.frameFlood(sf.bk.sframes, secevent.KindFloodSFrames, "rate of S-frames that acknowledge nothing new") {
+					return
+				}
 				if !sf.updateAckNoOut(head.rcvSN) {
 					sf.Error("fatal incoming acknowledge either earlier than previous or later than sendTime")
+					sf.seqViolation(ackKind(sf.ackNoSend, sf.seqNoSend, head.rcvSN), 0, head.rcvSN, apdu)
 					return
 				}
 				confirmStopDtIfDone()
@@ -339,10 +359,18 @@ func (sf *SrvSession) run(ctx context.Context) {
 						confirmStopDtIfDone()
 					}
 					sf.Warn("station not active")
+					sf.emit(secevent.Event{Kind: secevent.KindProtoIWhileStopped, Action: secevent.ActIgnored,
+						Detail: "I-frame received while data transfer is stopped: discarded", Raw: apdu})
 					break // not active, discard apdu
 				}
-				if !sf.updateAckNoOut(head.rcvSN) || head.sendSN != sf.seqNoRcv {
+				if !sf.updateAckNoOut(head.rcvSN) {
 					sf.Error("fatal incoming acknowledge either earlier than previous or later than sendTime")
+					sf.seqViolation(ackKind(sf.ackNoSend, sf.seqNoSend, head.rcvSN), head.sendSN, head.rcvSN, apdu)
+					return
+				}
+				if head.sendSN != sf.seqNoRcv {
+					sf.Error("fatal incoming acknowledge either earlier than previous or later than sendTime")
+					sf.seqViolation(sendSNKind(head.sendSN, sf.seqNoRcv), head.sendSN, head.rcvSN, apdu)
 					return
 				}
 
@@ -356,6 +384,11 @@ func (sf *SrvSession) run(ctx context.Context) {
 				}
 
 				sf.seqNoRcv = (sf.seqNoRcv + 1) & 32767
+				if seqNoCount(sf.ackNoRcv, sf.seqNoRcv) > sf.config.SendUnAckLimitK {
+					sf.emit(secevent.Event{Kind: secevent.KindSeqPeerK, Action: secevent.ActObserved,
+						Detail: fmt.Sprintf("the peer has sent %d I-frames without an acknowledgement, more than k=%d",
+							seqNoCount(sf.ackNoRcv, sf.seqNoRcv), sf.config.SendUnAckLimitK)})
+				}
 				if seqNoCount(sf.ackNoRcv, sf.seqNoRcv) >= sf.config.RecvUnAckLimitW {
 					sendSFrame(sf.seqNoRcv)
 					sf.ackNoRcv = sf.seqNoRcv
@@ -365,6 +398,10 @@ func (sf *SrvSession) run(ctx context.Context) {
 				sf.Debug("RX uFrame %v", head)
 				switch head.function {
 				case uStartDtActive:
+					if sf.bk != nil && sf.frameFlood(sf.bk.utoggle, secevent.KindFloodUToggle, "STARTDT/STOPDT rate") {
+						return
+					}
+					sf.emit(secevent.Event{Kind: secevent.KindCtrlStartDT, Detail: "STARTDT act received"})
 					sendUFrame(uStartDtConfirm)
 					isActive = true
 					everActive = true
@@ -377,6 +414,10 @@ func (sf *SrvSession) run(ctx context.Context) {
 				// 	isActive = true
 				// 	startDtActiveSendSince = willNotTimeout
 				case uStopDtActive:
+					if sf.bk != nil && sf.frameFlood(sf.bk.utoggle, secevent.KindFloodUToggle, "STARTDT/STOPDT rate") {
+						return
+					}
+					sf.emit(secevent.Event{Kind: secevent.KindCtrlStopDT, Detail: "STOPDT act received"})
 					// Stop handing out new I-frames at once, but do not
 					// confirm yet: the confirmation says data transfer has
 					// finished, and I-frames already sent may still be
@@ -406,9 +447,20 @@ func (sf *SrvSession) run(ctx context.Context) {
 				// 	isActive = false
 				// 	stopDtActiveSendSince = willNotTimeout
 				case uTestFrActive:
+					if sf.bk != nil && sf.frameFlood(sf.bk.testfr, secevent.KindFloodTestFR, "TESTFR act rate (keep-alive storm)") {
+						return
+					}
 					sendUFrame(uTestFrConfirm)
 				case uTestFrConfirm:
+					if testFrAliveSendSince == willNotTimeout {
+						sf.emit(secevent.Event{Kind: secevent.KindUnsolUConfirm, Action: secevent.ActIgnored,
+							Detail: "TESTFR con received with no TESTFR act outstanding"})
+					}
 					testFrAliveSendSince = willNotTimeout
+				case uStartDtConfirm, uStopDtConfirm:
+					// Monitor-direction frames: only an outstation sends them.
+					sf.emit(secevent.Event{Kind: secevent.KindProtoUWrongDir, Action: secevent.ActIgnored,
+						Detail: fmt.Sprintf("%v received by the controlled station: wrong direction", head)})
 				default:
 					sf.Error("illegal U-Frame functions[0x%02x] ignored", head.function)
 				}
@@ -433,6 +485,11 @@ func (sf *SrvSession) handlerLoop() {
 			asduPack := asdu.NewEmptyASDU(sf.params)
 			if err := asduPack.UnmarshalBinary(rawAsdu); err != nil {
 				sf.Error("asdu UnmarshalBinary failed,%+v", err)
+				sf.emit(secevent.Event{Kind: secevent.KindProtoASDUInvalid, Action: secevent.ActIgnored,
+					Detail: "ASDU rejected by the decoder: " + err.Error(), Err: err, Raw: rawAsdu})
+				continue
+			}
+			if sf.inspect(asduPack, rawAsdu) {
 				continue
 			}
 			if err := sf.serverHandler(asduPack); err != nil {
@@ -623,7 +680,14 @@ func (sf *SrvSession) Params() *asdu.Params {
 }
 
 // Send asdu frame
-func (sf *SrvSession) Send(u *asdu.ASDU) error {
+func (sf *SrvSession) Send(u *asdu.ASDU) error { return sf.send(u, true) }
+
+// send queues an ASDU. observe says whether a refusal in it is reported as a
+// security event; the library's own refusals were reported when decided.
+func (sf *SrvSession) send(u *asdu.ASDU, observe bool) error {
+	if observe {
+		sf.observeOutbound(u)
+	}
 	if !sf.IsConnected() {
 		return ErrUseClosedConnection
 	}
@@ -653,4 +717,12 @@ func (sf *SrvSession) queueRaw(b []byte) {
 	case sf.sendRaw <- b:
 	case <-sf.ctx.Done():
 	}
+}
+
+// seqViolation reports the sequence error that is about to close the session.
+func (sf *SrvSession) seqViolation(kind secevent.Kind, send, recv uint16, raw []byte) {
+	sf.noteEnd("sequence error: " + string(kind))
+	sf.emit(secevent.Event{Kind: kind, Action: secevent.ActDisconnected, Fields: secevent.FieldSeq,
+		SendSN: send, RecvSN: recv, ExpectedSN: sf.seqNoRcv, Raw: raw,
+		Detail: seqDetail(kind, send, recv, sf.seqNoRcv, sf.ackNoSend, sf.seqNoSend)})
 }

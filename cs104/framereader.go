@@ -6,10 +6,13 @@ package cs104
 
 import (
 	"bufio"
+	"fmt"
 	"io"
 	"net"
 	"sync/atomic"
 	"time"
+
+	"github.com/riclolsen/go-iecp5/secevent"
 )
 
 // frameReader assembles APDUs from a stream.
@@ -29,6 +32,9 @@ type frameReader struct {
 	// updated by the receive goroutine and read by others.
 	garbage atomic.Uint64
 	badLen  atomic.Uint64
+
+	// hook, when set, is told of protocol violations as they are found.
+	hook func(kind secevent.Kind, detail string, raw []byte)
 }
 
 func newFrameReader(conn net.Conn, assemble time.Duration) *frameReader {
@@ -40,6 +46,16 @@ func newFrameReader(conn net.Conn, assemble time.Duration) *frameReader {
 // no APDU can have, are skipped and counted. Any read error ends the stream.
 func (fr *frameReader) next() ([]byte, error) {
 	buf := make([]byte, APDUSizeMax)
+	var skipped int
+	var sample [16]byte
+	flush := func() {
+		if skipped > 0 && fr.hook != nil {
+			fr.hook(secevent.KindProtoGarbage,
+				fmt.Sprintf("%d octet(s) discarded while looking for a start character", skipped),
+				sample[:min(skipped, len(sample))])
+		}
+		skipped = 0
+	}
 	for {
 		// Idle: no deadline.
 		if fr.assemble > 0 {
@@ -47,12 +63,18 @@ func (fr *frameReader) next() ([]byte, error) {
 		}
 		b, err := fr.r.ReadByte()
 		if err != nil {
+			flush()
 			return nil, err
 		}
 		if b != startFrame {
+			if skipped < len(sample) {
+				sample[skipped] = b
+			}
+			skipped++
 			fr.garbage.Add(1)
 			continue
 		}
+		flush()
 		if fr.assemble > 0 {
 			_ = fr.conn.SetReadDeadline(time.Now().Add(fr.assemble))
 		}
@@ -63,6 +85,10 @@ func (fr *frameReader) next() ([]byte, error) {
 		length := int(buf[1]) + 2
 		if length < APCICtlFiledSize+2 || length > APDUSizeMax {
 			fr.badLen.Add(1)
+			if fr.hook != nil {
+				fr.hook(secevent.KindProtoBadLength,
+					fmt.Sprintf("APDU length octet %d is outside [%d, %d]", buf[1], APCICtlFiledSize, APDUSizeMax-2), buf[:2])
+			}
 			// A start character in the length position may begin the real
 			// frame; look at it again instead of discarding it.
 			if buf[1] == startFrame {

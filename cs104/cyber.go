@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/riclolsen/go-iecp5/internal/secmon"
 	"github.com/riclolsen/go-iecp5/secevent"
 )
 
@@ -251,6 +252,12 @@ func (sf *SrvSession) beginCyber() {
 	sf.endMu.Lock()
 	sf.endReason = ""
 	sf.endMu.Unlock()
+	if sf.guard != nil {
+		sf.pol = sf.guard.Policy()
+		sf.bk = newBuckets(sf.pol.Limits)
+		sf.scan = secmon.NewScan(sf.pol.ScanThreshold, sf.pol.ScanWindow)
+		sf.rejects = nil
+	}
 	p := peerInfoFromConn(sf.conn)
 	if sf.presetPeer != nil {
 		// Admission already identified the peer, MAC address included.
@@ -442,4 +449,60 @@ func guardFor(p *secevent.Policy, em *secevent.Emitter) *secevent.Guard {
 		em.SetSinkOptions(p.Sink, secevent.Options{AggregateWindow: p.AggregateWindow, MaxRaw: p.MaxRaw})
 	}
 	return secevent.NewGuard(*p, em)
+}
+
+// ackKind says what is wrong with an N(R) outside the window of sent frames:
+// it acknowledges frames never sent, or goes back on one already acknowledged.
+func ackKind(ackNoSend, seqNoSend, ackNo uint16) secevent.Kind {
+	if seqNoCount(seqNoSend, ackNo) < 16384 {
+		return secevent.KindSeqNrAhead
+	}
+	return secevent.KindSeqNrRegressed
+}
+
+// sendSNKind says what is wrong with an I-frame whose N(S) is not the
+// expected one: the previous frame again (a replay or duplication), frames
+// skipped (loss or injection), or an older frame (a late replay).
+func sendSNKind(sendSN, expected uint16) secevent.Kind {
+	switch d := (sendSN - expected) & 32767; {
+	case d == 32767:
+		return secevent.KindSeqNsDuplicate
+	case d < 16384:
+		return secevent.KindSeqNsGap
+	default:
+		return secevent.KindSeqNsBehind
+	}
+}
+
+func seqDetail(kind secevent.Kind, send, recv, expected, ackNoSend, seqNoSend uint16) string {
+	switch kind {
+	case secevent.KindSeqNsDuplicate:
+		return fmt.Sprintf("I-frame N(S)=%d repeats the previous frame (expected %d): replay or duplication", send, expected)
+	case secevent.KindSeqNsGap:
+		return fmt.Sprintf("I-frame N(S)=%d is ahead of the expected %d: frames lost or injected", send, expected)
+	case secevent.KindSeqNsBehind:
+		return fmt.Sprintf("I-frame N(S)=%d is older than the expected %d: late replay", send, expected)
+	case secevent.KindSeqNrAhead:
+		return fmt.Sprintf("N(R)=%d acknowledges frames never sent (sent up to %d): injection or hijack", recv, seqNoSend)
+	default:
+		return fmt.Sprintf("N(R)=%d goes back on the acknowledged %d", recv, ackNoSend)
+	}
+}
+
+// frameFlood checks a frame-level rate. It only reports, or ends the
+// session: dropping a protocol frame would break the link for the peers that
+// are behaving, so there is no throttling here. It returns true when the
+// session must end.
+func (sf *SrvSession) frameFlood(b *secmon.Bucket, kind secevent.Kind, what string) bool {
+	if b.Allow(time.Now()) {
+		return false
+	}
+	end := sf.pol.FloodAction == secevent.ActDisconnected
+	act := secevent.ActObserved
+	if end {
+		act = secevent.ActDisconnected
+		sf.noteEnd("flood: " + string(kind))
+	}
+	sf.emit(secevent.Event{Kind: kind, Action: act, Detail: what + " exceeds the rate limit"})
+	return end
 }

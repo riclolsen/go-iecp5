@@ -29,6 +29,9 @@ type Guard struct {
 	rate     map[netip.Addr]*secmon.Bucket
 	global   *secmon.Bucket
 	lastSwep time.Time
+
+	dupMu sync.Mutex
+	dup   map[string]time.Time
 }
 
 // NewGuard creates a Guard that raises its events through em.
@@ -36,6 +39,7 @@ func NewGuard(p Policy, em *Emitter) *Guard {
 	p.defaults()
 	return &Guard{
 		p: p, em: em,
+		dup:    map[string]time.Time{},
 		perIP:  map[netip.Addr]int{},
 		rate:   map[netip.Addr]*secmon.Bucket{},
 		global: secmon.NewBucket(p.GlobalAcceptRate.N, p.GlobalAcceptRate.Per, 0),
@@ -299,4 +303,29 @@ func (g *Guard) WatchMAC(ctx context.Context, id uint64, get func() PeerInfo, se
 			}
 		}
 	}()
+}
+
+// SeenCommand reports whether an identical command was seen within
+// DuplicateWindow, and records this one. The key identifies the command
+// byte for byte; the window is shared by all sessions of the endpoint.
+func (g *Guard) SeenCommand(key string, now time.Time) bool {
+	w := g.p.DuplicateWindow
+	if w <= 0 {
+		return false
+	}
+	g.dupMu.Lock()
+	defer g.dupMu.Unlock()
+	if len(g.dup) >= 4096 {
+		for k, t := range g.dup { // bounded: forget what has expired
+			if now.Sub(t) > w {
+				delete(g.dup, k)
+			}
+		}
+		if len(g.dup) >= 4096 {
+			g.dup = map[string]time.Time{}
+		}
+	}
+	prev, ok := g.dup[key]
+	g.dup[key] = now
+	return ok && now.Sub(prev) < w
 }
