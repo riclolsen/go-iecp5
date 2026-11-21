@@ -7,6 +7,7 @@ package cs104
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/riclolsen/go-iecp5/asdu"
 	"github.com/riclolsen/go-iecp5/clog"
+	"github.com/riclolsen/go-iecp5/secevent"
 )
 
 const (
@@ -58,6 +60,18 @@ type SrvSession struct {
 	cancel       context.CancelFunc
 	ctx          context.Context
 	serverNumber int
+
+	// security events
+	cyber     *secevent.Emitter
+	sessionID atomic.Uint64
+	inbound   bool // accepted by a Server, as opposed to dialled out
+	peerMu    sync.RWMutex
+	peer      secevent.PeerInfo
+	started   time.Time
+	framesIn  atomic.Uint64 // frames that parsed
+	framesOut atomic.Uint64
+	endMu     sync.Mutex
+	endReason string
 }
 
 // RecvLoop feeds t.rcvRaw.
@@ -74,6 +88,7 @@ func (sf *SrvSession) recvLoop() {
 		apdu, err := fr.next()
 		if err != nil {
 			sf.Error("receive failed, %v", err)
+			sf.noteEnd(fmt.Sprintf("receive failed: %v", err))
 			return
 		}
 		sf.Debug("RX Raw[% x]", apdu)
@@ -100,6 +115,7 @@ func (sf *SrvSession) sendLoop() {
 			return
 		case apdu := <-sf.sendRaw:
 			sf.Debug("TX Raw[% x]", apdu)
+			sf.framesOut.Add(1)
 			for wrCnt := 0; len(apdu) > wrCnt; {
 				// A peer that stops reading must not be able to hold this
 				// goroutine, and with it the state machine, for ever.
@@ -107,6 +123,9 @@ func (sf *SrvSession) sendLoop() {
 				byteCount, err := sf.conn.Write(apdu[wrCnt:])
 				if errors.Is(err, os.ErrDeadlineExceeded) {
 					sf.Error("sendRaw stalled for longer than t₁, peer is not reading: %v", err)
+					sf.noteEnd("peer stopped reading (write stalled for t₁)")
+					sf.emit(secevent.Event{Kind: secevent.KindDoSWriteStall, Action: secevent.ActDisconnected,
+						Detail: "peer is not reading: a write was blocked for longer than t₁", Err: err})
 					return
 				}
 				if err != nil {
@@ -114,10 +133,12 @@ func (sf *SrvSession) sendLoop() {
 					if err != io.EOF && err != io.ErrClosedPipe ||
 						strings.Contains(err.Error(), "use of closed network connection") {
 						sf.Error("sendRaw failed, %v", err)
+						sf.noteEnd(fmt.Sprintf("send failed: %v", err))
 						return
 					}
 					if e, ok := err.(net.Error); !ok || !e.Temporary() {
 						sf.Error("sendRaw failed, %v", err)
+						sf.noteEnd(fmt.Sprintf("send failed: %v", err))
 						return
 					}
 					// temporary error may be recoverable
@@ -136,6 +157,7 @@ func (sf *SrvSession) run(ctx context.Context) {
 
 	sf.ctx, sf.cancel = context.WithCancel(ctx)
 	sf.setConnectStatus(connected)
+	sf.beginCyber()
 	sf.wg.Add(3)
 	go sf.recvLoop()
 	go sf.sendLoop()
@@ -205,6 +227,7 @@ func (sf *SrvSession) run(ctx context.Context) {
 		checkTicker.Stop()
 		_ = sf.conn.Close() // chain trigger cancel
 		sf.wg.Wait()
+		sf.endCyber()
 		if sf.connectionLost != nil {
 			sf.connectionLost(sf)
 		}
@@ -234,6 +257,9 @@ func (sf *SrvSession) run(ctx context.Context) {
 				// now.Sub(startDtActiveSendSince) >= t.SendUnAckTimeout1 ||
 				// now.Sub(stopDtActiveSendSince) >= t.SendUnAckTimeout1 ||
 				sf.Error("test frame alive confirm timeout t₁")
+				sf.noteEnd("TESTFR not confirmed within t₁")
+				sf.emit(secevent.Event{Kind: secevent.KindConnT1Timeout, Action: secevent.ActDisconnected,
+					Detail: "TESTFR act was not confirmed within t₁"})
 				return
 			}
 			// check oldest unacknowledged outbound
@@ -242,6 +268,9 @@ func (sf *SrvSession) run(ctx context.Context) {
 				now.Sub(sf.pending[0].sendTime) >= sf.config.SendUnAckTimeout1 {
 				sf.ackNoSend++
 				sf.Error("fatal transmission timeout t₁")
+				sf.noteEnd("I-frame not acknowledged within t₁")
+				sf.emit(secevent.Event{Kind: secevent.KindConnT1Timeout, Action: secevent.ActDisconnected,
+					Detail: "an I-frame was not acknowledged within t₁"})
 				return
 			}
 
@@ -253,8 +282,11 @@ func (sf *SrvSession) run(ctx context.Context) {
 				sf.ackNoRcv = sf.seqNoRcv
 			}
 
-			// When the idle time is up, send a TestFrActive frame to keep alive
-			if now.Sub(idleTimeout3Sine) >= sf.config.IdleTimeout3 {
+			// When the idle time is up, send a TestFrActive frame to keep alive. Only
+			// one is outstanding at a time: sending another would restart the t₁
+			// clock, and a peer that never answers would then never be dropped
+			// when t₃ is shorter than t₁.
+			if testFrAliveSendSince == willNotTimeout && now.Sub(idleTimeout3Sine) >= sf.config.IdleTimeout3 {
 				sendUFrame(uTestFrActive)
 				testFrAliveSendSince = time.Now()
 				idleTimeout3Sine = testFrAliveSendSince
@@ -271,6 +303,7 @@ func (sf *SrvSession) run(ctx context.Context) {
 				sf.Error("%v, frame ignored [% x]", err, apdu)
 				continue
 			}
+			sf.framesIn.Add(1)
 			switch head := apci.(type) {
 			case sAPCI:
 				sf.Debug("RX sFrame %v", head)

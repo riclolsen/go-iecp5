@@ -7,6 +7,7 @@ package cs104
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"math/rand"
 	"net"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/riclolsen/go-iecp5/asdu"
 	"github.com/riclolsen/go-iecp5/clog"
+	"github.com/riclolsen/go-iecp5/secevent"
 )
 
 const (
@@ -69,11 +71,22 @@ type Client struct {
 	onConnectTimeout func(c *Client)
 	onActivated      func(c *Client)
 	onDeactivated    func(c *Client)
+
+	// security events
+	cyber     secevent.Emitter
+	sessionID atomic.Uint64
+	peerMu    sync.RWMutex
+	peer      secevent.PeerInfo
+	started   time.Time
+	framesIn  atomic.Uint64
+	framesOut atomic.Uint64
+	endMu     sync.Mutex
+	endReason string
 }
 
 // NewClient returns an IEC104 master,default config and default asdu.ParamsWide params
 func NewClient(handler ClientHandlerInterface, o *ClientOption) *Client {
-	return &Client{
+	c := &Client{
 		option:           *o,
 		handler:          handler,
 		rcvASDU:          make(chan []byte, o.config.RecvUnAckLimitW<<4),
@@ -87,6 +100,8 @@ func NewClient(handler ClientHandlerInterface, o *ClientOption) *Client {
 		onActivated:      func(*Client) {},
 		onDeactivated:    func(*Client) {},
 	}
+	c.cyber.Protocol, c.cyber.Role = "iec104", "client"
+	return c
 }
 
 // SetOnConnectHandler set on connect handler
@@ -166,6 +181,9 @@ func (sf *Client) running() {
 		conn, err := openConnection(sf.option.server, sf.option.TLSConfig, sf.option.config.ConnectTimeout0)
 		if err != nil {
 			sf.Error("connect failed, %v", err)
+			sf.emit(secevent.Event{Kind: secevent.KindConnDialFailed, Err: err,
+				Peer:   secevent.PeerInfo{Network: "tcp"},
+				Detail: fmt.Sprintf("could not connect to %v", sf.option.server)})
 			sf.onConnectTimeout(sf)
 			if !sf.option.autoReconnect {
 				return
@@ -201,6 +219,7 @@ func (sf *Client) recvLoop() {
 		apdu, err := fr.next()
 		if err != nil {
 			sf.Error("receive failed, %v", err)
+			sf.noteEnd(fmt.Sprintf("receive failed: %v", err))
 			return
 		}
 		sf.Debug("RX Raw[% x]", apdu)
@@ -225,6 +244,7 @@ func (sf *Client) sendLoop() {
 			return
 		case apdu := <-sf.sendRaw:
 			sf.Debug("TX Raw[% x]", apdu)
+			sf.framesOut.Add(1)
 			for wrCnt := 0; len(apdu) > wrCnt; {
 				// A peer that stops reading must not be able to hold this
 				// goroutine, and with it the state machine, for ever.
@@ -232,6 +252,9 @@ func (sf *Client) sendLoop() {
 				byteCount, err := sf.conn.Write(apdu[wrCnt:])
 				if errors.Is(err, os.ErrDeadlineExceeded) {
 					sf.Error("sendRaw stalled for longer than t₁, peer is not reading: %v", err)
+					sf.noteEnd("peer stopped reading (write stalled for t₁)")
+					sf.emit(secevent.Event{Kind: secevent.KindDoSWriteStall, Action: secevent.ActDisconnected,
+						Detail: "peer is not reading: a write was blocked for longer than t₁", Err: err})
 					return
 				}
 				if err != nil {
@@ -239,10 +262,12 @@ func (sf *Client) sendLoop() {
 					if err != io.EOF && err != io.ErrClosedPipe ||
 						strings.Contains(err.Error(), "use of closed network connection") {
 						sf.Error("sendRaw failed, %v", err)
+						sf.noteEnd(fmt.Sprintf("send failed: %v", err))
 						return
 					}
 					if e, ok := err.(net.Error); !ok || !e.Temporary() {
 						sf.Error("sendRaw failed, %v", err)
+						sf.noteEnd(fmt.Sprintf("send failed: %v", err))
 						return
 					}
 					// temporary error may be recoverable
@@ -261,6 +286,7 @@ func (sf *Client) run(ctx context.Context) {
 
 	sf.ctx, sf.cancel = context.WithCancel(ctx)
 	sf.setConnectStatus(connected)
+	sf.beginCyber()
 	sf.wg.Add(3)
 	go sf.recvLoop()
 	go sf.sendLoop()
@@ -309,6 +335,7 @@ func (sf *Client) run(ctx context.Context) {
 		checkTicker.Stop()
 		_ = sf.conn.Close() // chain trigger cancel
 		sf.wg.Wait()
+		sf.endCyber()
 		sf.onConnectionLost(sf)
 		sf.Debug("run stopped!")
 	}()
@@ -337,6 +364,9 @@ func (sf *Client) run(ctx context.Context) {
 				now.Sub(sf.startDtActiveSendSince.Load().(time.Time)) >= sf.option.config.SendUnAckTimeout1 ||
 				now.Sub(sf.stopDtActiveSendSince.Load().(time.Time)) >= sf.option.config.SendUnAckTimeout1 {
 				sf.Error("test frame alive confirm timeout t₁")
+				sf.noteEnd("STARTDT, STOPDT or TESTFR not confirmed within t₁")
+				sf.emit(secevent.Event{Kind: secevent.KindConnT1Timeout, Action: secevent.ActDisconnected,
+					Detail: "STARTDT, STOPDT or TESTFR act was not confirmed within t₁"})
 				return
 			}
 			// check oldest unacknowledged outbound
@@ -345,6 +375,9 @@ func (sf *Client) run(ctx context.Context) {
 				now.Sub(sf.pending[0].sendTime) >= sf.option.config.SendUnAckTimeout1 {
 				sf.ackNoSend++
 				sf.Error("fatal transmission timeout t₁")
+				sf.noteEnd("I-frame not acknowledged within t₁")
+				sf.emit(secevent.Event{Kind: secevent.KindConnT1Timeout, Action: secevent.ActDisconnected,
+					Detail: "an I-frame was not acknowledged within t₁"})
 				return
 			}
 
@@ -356,8 +389,11 @@ func (sf *Client) run(ctx context.Context) {
 				sf.ackNoRcv = sf.seqNoRcv
 			}
 
-			// When the idle time is up, send a TestFrActive frame to keep alive
-			if now.Sub(idleTimeout3Sine) >= sf.option.config.IdleTimeout3 {
+			// When the idle time is up, send a TestFrActive frame to keep alive. Only
+			// one is outstanding at a time: sending another would restart the t₁
+			// clock, and a peer that never answers would then never be dropped
+			// when t₃ is shorter than t₁.
+			if testFrAliveSendSince == willNotTimeout && now.Sub(idleTimeout3Sine) >= sf.option.config.IdleTimeout3 {
 				sf.queueUFrame(uTestFrActive)
 				testFrAliveSendSince = time.Now()
 				idleTimeout3Sine = testFrAliveSendSince
@@ -374,6 +410,7 @@ func (sf *Client) run(ctx context.Context) {
 				sf.Error("%v, frame ignored [% x]", err, apdu)
 				continue
 			}
+			sf.framesIn.Add(1)
 			switch head := apci.(type) {
 			case sAPCI:
 				sf.Debug("RX sFrame %v", head)

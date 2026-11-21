@@ -15,6 +15,7 @@ import (
 
 	"github.com/riclolsen/go-iecp5/asdu"
 	"github.com/riclolsen/go-iecp5/clog"
+	"github.com/riclolsen/go-iecp5/secevent"
 )
 
 // timeoutResolution is seconds according to companion standard 104,
@@ -38,17 +39,21 @@ type Server struct {
 	serverNumber int
 	// configErr is why the last SetConfig fell back to DefaultConfig.
 	configErr error
+	// cyber delivers security events; see SetCyberEventSink.
+	cyber secevent.Emitter
 }
 
 // NewServer new a server, default config and default asdu.ParamsWide params
 func NewServer(handler ServerHandlerInterface) *Server {
-	return &Server{
+	sf := &Server{
 		config:   DefaultConfig(),
 		params:   *asdu.ParamsWide,
 		handler:  handler,
 		sessions: make(map[*SrvSession]struct{}),
 		Clog:     clog.NewLogger("cs104 server => "),
 	}
+	sf.cyber.Protocol, sf.cyber.Role = "iec104", "server"
+	return sf
 }
 
 // SetConfig sets the config. An invalid config is not used: DefaultConfig()
@@ -137,6 +142,8 @@ func (sf *Server) serve(listen net.Listener) error {
 				backoff = time.Second
 			}
 			sf.Critical("accept failed, retrying in %v: %v", backoff, err)
+			sf.cyber.Emit(secevent.Event{Kind: secevent.KindConnAcceptError, Err: err,
+				Detail: fmt.Sprintf("accept failed, retrying in %v", backoff)})
 			time.Sleep(backoff)
 			continue
 		}
@@ -171,6 +178,8 @@ func (sf *Server) serve(listen net.Listener) error {
 				connectionLost: sf.connectionLost,
 				Clog:           sf.Clog,
 				serverNumber:   sf.serverNumber,
+				cyber:          &sf.cyber,
+				inbound:        true,
 			}
 			sf.mux.Lock()
 			sf.sessions[sess] = struct{}{}
@@ -331,4 +340,5 @@ func (sf *Server) GetSessionsLen() int {
 
 func (sf *Server) SetServerNumber(n int) {
 	sf.serverNumber = n
+	sf.cyber.Endpoint = n
 }
